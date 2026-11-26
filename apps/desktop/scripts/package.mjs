@@ -111,6 +111,9 @@ const archList = archs.map((a) => Arch[a]);
 if (archList.some((a) => a === undefined)) throw new Error(`Unknown --arch in ${archs.join(", ")}`);
 const hostOnly = archs.length === 1 && archs[0] === process.arch;
 const targets = platform.createTarget(values.dir ? ["dir"] : null, ...archList);
+// The stage was installed with npm and has no lockfile. The inherited pnpm user agent
+// would select electron-builder's pnpm collector and fall back to workspace dependencies.
+process.env.npm_config_user_agent = "npm";
 const artifacts = await build({
   projectDir: root,
   targets,
