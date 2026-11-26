@@ -1,10 +1,12 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { useEffect, useRef } from "react";
+import { useEffect, useEffectEvent, useRef } from "react";
+import { toast } from "sonner";
 import { useClient } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useResolvedTheme } from "@/stores/theme";
+import { loginPaste } from "./login-paste";
 
 const themes = {
   dark: {
@@ -51,6 +53,8 @@ export function TerminalView({
   className,
   slot = "panel",
   ephemeral = false,
+  login = false,
+  onExit,
 }: {
   sessionId: string | null;
   command?: string;
@@ -58,15 +62,19 @@ export function TerminalView({
   /** Distinguishes several terminals of one session (panel, drawer). */
   slot?: string;
   ephemeral?: boolean;
+  login?: boolean;
+  onExit?: (exitCode: number | null) => void;
 }) {
   const client = useClient();
   const theme = useResolvedTheme();
   const host = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  const notifyExit = useEffectEvent((exitCode: number | null) => onExit?.(exitCode));
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: theme is applied separately below.
   useEffect(() => {
-    if (!host.current) return;
+    const element = host.current;
+    if (!element) return;
     const term = new Terminal({
       fontFamily: '"Geist Mono Variable", ui-monospace, monospace',
       fontSize: 12,
@@ -78,17 +86,24 @@ export function TerminalView({
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    term.open(host.current);
+    term.open(element);
     termRef.current = term;
     const key = `${sessionId ?? "home"}:${slot}`;
     const ptyId = ephemeral ? undefined : attached.get(key);
-    const channel = client.openTerminal({ sessionId, command, ptyId });
+    const channel = client.openTerminal({
+      sessionId,
+      command,
+      ptyId,
+      ephemeral: ephemeral && login,
+    });
     const offData = channel.onData((d) => term.write(d));
     const offEvent = channel.onEvent((e) => {
       if (e.type === "opened" && !ephemeral) attached.set(key, e.ptyId);
       if (e.type === "exited") {
-        attached.delete(key);
+        if (!ephemeral) attached.delete(key);
+        term.options.disableStdin = true;
         term.write("\r\n\x1b[2m[process exited]\x1b[0m\r\n");
+        notifyExit(e.exitCode);
       }
       if (e.type === "error") {
         if (ptyId) attached.delete(key);
@@ -96,6 +111,8 @@ export function TerminalView({
       }
     });
     const offInput = term.onData((d) => channel.write(d));
+    const offPaste = login ? bindLoginPaste(term, element) : undefined;
+    if (login) term.focus();
     const resize = () => {
       try {
         fit.fit();
@@ -105,19 +122,20 @@ export function TerminalView({
       }
     };
     const observer = new ResizeObserver(resize);
-    observer.observe(host.current);
+    observer.observe(element);
     resize();
     return () => {
       observer.disconnect();
       offData();
       offEvent();
       offInput.dispose();
-      if (ephemeral) channel.kill();
+      offPaste?.();
+      if (ephemeral && !login) channel.kill();
       else channel.close();
       term.dispose();
       termRef.current = null;
     };
-  }, [client, sessionId, command, slot, ephemeral]);
+  }, [client, sessionId, command, slot, ephemeral, login]);
 
   useEffect(() => {
     if (termRef.current) termRef.current.options.theme = themes[theme];
@@ -128,4 +146,48 @@ export function TerminalView({
       <div ref={host} className="h-full w-full" data-testid="terminal" />
     </div>
   );
+}
+
+function bindLoginPaste(term: Terminal, element: HTMLElement): () => void {
+  const paste = (text: string) => {
+    if (term.options.disableStdin) return;
+    const code = loginPaste(text);
+    if (code) term.paste(code);
+  };
+  // Leave Ctrl+V to the browser's native paste action instead of emitting Ctrl+V as terminal input.
+  term.attachCustomKeyEventHandler(
+    (event) =>
+      !((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "v"),
+  );
+  const onPaste = (event: ClipboardEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    paste(event.clipboardData?.getData("text/plain") ?? "");
+  };
+  let disposed = false;
+  const onContextMenu = (event: MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (term.options.disableStdin) return;
+    term.focus();
+    if (!navigator.clipboard) {
+      toast.error("Clipboard unavailable. Paste with Ctrl+V or ⌘V.");
+      return;
+    }
+    void navigator.clipboard.readText().then(
+      (text) => {
+        if (!disposed) paste(text);
+      },
+      () => {
+        if (!disposed) toast.error("Clipboard unavailable. Paste with Ctrl+V or ⌘V.");
+      },
+    );
+  };
+  element.addEventListener("paste", onPaste, true);
+  element.addEventListener("contextmenu", onContextMenu, true);
+  return () => {
+    disposed = true;
+    element.removeEventListener("paste", onPaste, true);
+    element.removeEventListener("contextmenu", onContextMenu, true);
+  };
 }

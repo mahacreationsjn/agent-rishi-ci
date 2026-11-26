@@ -121,6 +121,7 @@ export function SetupChecklist() {
   const queryClient = useQueryClient();
   const [fixing, setFixing] = useState<SetupCheck | null>(null);
   const [rechecking, setRechecking] = useState(false);
+  const login = fixing?.fix?.kind === "login";
   const { data } = useSetupStatus();
   // Rows for the agent providers the runner loaded carry a "provider" tag (data, not ids).
   const providers = useSnapshotData((s) => s.runner.providers, []);
@@ -142,7 +143,7 @@ export function SetupChecklist() {
   const closeFix = () => {
     const check = fixing;
     setFixing(null);
-    if (check) void recheck(check);
+    if (check && !login) void recheck(check);
   };
 
   const rows: { id: string; label: string; check?: SetupCheck }[] = data
@@ -233,19 +234,33 @@ export function SetupChecklist() {
         </Button>
       </div>
       <Dialog open={fixing !== null} onOpenChange={(o) => !o && closeFix()}>
-        <DialogContent className="sm:max-w-2xl">
+        <DialogContent
+          className="sm:max-w-2xl"
+          onOpenAutoFocus={login ? (event) => event.preventDefault() : undefined}
+          onInteractOutside={login ? (event) => event.preventDefault() : undefined}
+        >
           <DialogHeader>
             <DialogTitle>
               {fixing?.fix ? fixLabel[fixing.fix.kind] : ""} · {fixing?.label}
             </DialogTitle>
             <DialogDescription>
-              {fixing?.fix?.kind === "login"
-                ? "Runs the tool's own login. Finish in your browser, then close this window."
+              {login
+                ? "Follow the tool's sign-in instructions. If prompted, paste the code with Ctrl+V or right-click, then press Enter."
                 : "Runs the command in a terminal on this machine. Close this window when it's done."}
             </DialogDescription>
           </DialogHeader>
           <div className="h-64 overflow-hidden rounded-lg border border-border">
-            {fixing && <TerminalView sessionId={null} command={fixing.fix?.command} ephemeral />}
+            {fixing && (
+              <TerminalView
+                sessionId={null}
+                command={fixing.fix?.command}
+                ephemeral
+                login={login}
+                onExit={(code) => {
+                  if (login && code === 0) void recheck(fixing);
+                }}
+              />
+            )}
           </div>
           <div className="flex items-center justify-between">
             {fixing?.fix?.url ? (
@@ -259,7 +274,7 @@ export function SetupChecklist() {
             ) : (
               <span />
             )}
-            <Button onClick={closeFix}>Done, re-check</Button>
+            <Button onClick={closeFix}>{login ? "Close" : "Done, re-check"}</Button>
           </div>
         </DialogContent>
       </Dialog>

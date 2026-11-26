@@ -17,7 +17,10 @@ export async function hasAgyKeyringEntry(platform: NodeJS.Platform): Promise<boo
     );
     // cmdkey can exit successfully with no match. Match the target, independent of localized labels.
     return (
-      result.code === 0 && /LegacyGeneric:target=gemini:antigravity[ \t]*\r?$/im.test(result.stdout)
+      result.code === 0 &&
+      /^[^:\r\n]+:[ \t]+(?:LegacyGeneric:target=)?gemini:antigravity[ \t]*\r?$/im.test(
+        result.stdout,
+      )
     );
   }
   if (platform === "darwin") {

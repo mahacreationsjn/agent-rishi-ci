@@ -194,7 +194,7 @@ export type GitPushResponse = z.infer<typeof GitPushResponse>;
 // ---------------------------------------------------------------------------- terminal
 
 /**
- * `GET /ws/pty?sessionId=&ptyId=&command=&cols=&rows=` opens (or, with `ptyId`, attaches to)
+ * `GET /ws/pty?sessionId=&ptyId=&command=&ephemeral=&cols=&rows=` opens (or attaches to)
  * a runner terminal. Without `sessionId` the terminal opens in the Agent Rishi home folder.
  * Server -> client frames are plain text (terminal output) except for `TerminalServerMessage`
  * control frames, which are JSON objects prefixed with `\u0000`.
@@ -205,6 +205,8 @@ export const TerminalQuery = z.object({
   ptyId: PtyId.optional(),
   /** Run this command in the shell once it starts (e.g. `claude auth login`). */
   command: z.string().max(2_000).optional(),
+  /** Run a login command as a one-shot shell and release its terminal when the socket closes. */
+  ephemeral: z.literal("1").optional(),
   cols: z.coerce.number().int().positive().max(1_000).default(120),
   rows: z.coerce.number().int().positive().max(500).default(30),
 });

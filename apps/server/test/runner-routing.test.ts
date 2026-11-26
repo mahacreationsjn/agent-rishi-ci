@@ -1,7 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HOME_RUNNER_ID, type RunnerRecord } from "@agent-rishi/contracts";
+import { HOME_RUNNER_ID, type RunnerCommand, type RunnerRecord } from "@agent-rishi/contracts";
 import type { WSContext } from "hono/ws";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type Database, openDatabase } from "../src/db/client";
@@ -247,5 +247,37 @@ describe("terminal and browser routing", () => {
     await browser.tabs("on-1");
     await browser.tabs("other");
     expect(calls).toEqual(["rn-1:browser.tabs.list", "home:browser.tabs.list"]);
+  });
+
+  it("closes an ephemeral login terminal if its socket disconnects during startup", async () => {
+    const opening = Promise.withResolvers<{ pid: number }>();
+    const closing = Promise.withResolvers<RunnerCommand>();
+    const commands: RunnerCommand[] = [];
+    const runner: RunnerPort = {
+      ...home,
+      request: (async (command: RunnerCommand) => {
+        commands.push(command);
+        if (command.name === "pty.open") return opening.promise;
+        closing.resolve(command);
+        return {};
+      }) as RunnerPort["request"],
+    };
+    const bridge = new TerminalBridge({ runner, cwdFor: () => dir });
+    const sent: string[] = [];
+    const ws = { send: (d: string) => sent.push(d) } as unknown as WSContext;
+    const events = bridge.handlers({
+      command: "agy acp --login",
+      ephemeral: "1",
+      cols: 80,
+      rows: 24,
+    });
+    events.onOpen?.(new Event("open"), ws);
+    events.onClose?.(new CloseEvent("close"), ws);
+    expect(commands).toEqual([
+      expect.objectContaining({ name: "pty.open", args: expect.any(Array) }),
+    ]);
+    opening.resolve({ pid: 1 });
+    expect(await closing.promise).toMatchObject({ name: "pty.close" });
+    expect(sent).toEqual([]);
   });
 });

@@ -8,6 +8,7 @@ import {
   type TerminalQuery,
   type TerminalServerMessage,
 } from "@agent-rishi/contracts";
+import { defaultShell, shellSyntax } from "@agent-rishi/providers";
 import type { WSContext, WSEvents } from "hono/ws";
 import { errorMessage } from "../services/errors";
 import { type RunnerDeps, type RunnerPort, runnerForSession } from "../services/runner-port";
@@ -20,7 +21,7 @@ export interface TerminalBridgeDeps extends RunnerDeps {
 
 /**
  * Bridges UI terminal sockets (`/ws/pty`, §12.1) to runner terminals (`pty.*`). Terminals
- * live in the runner, so closing a socket only detaches; `kill` closes the terminal.
+ * live in the runner. Closing a socket detaches except for ephemeral login terminals, which close.
  * Output arrives as runner stream data and is fanned out to every attached socket.
  *
  * A session's terminal runs on the session's runner, any other on the home runner. The server
@@ -36,11 +37,16 @@ export class TerminalBridge {
 
   handlers(query: TerminalQuery): WSEvents {
     let ptyId: string | undefined;
+    let closed = false;
+    const ephemeral = Boolean(query.ephemeral && query.command && !query.ptyId);
     return {
       onOpen: (_event, ws) => {
         // Set before `opened` is sent, so input the client sends right away is not dropped.
         void this.open(ws, query, (id) => {
           ptyId = id;
+          if (closed && ephemeral) void this.release(id);
+          else if (closed) this.sockets.get(id)?.delete(ws);
+          return !closed;
         });
       },
       onMessage: (event, ws) => {
@@ -56,7 +62,10 @@ export class TerminalBridge {
         );
       },
       onClose: (_event, ws) => {
-        if (ptyId) this.sockets.get(ptyId)?.delete(ws);
+        closed = true;
+        if (!ptyId) return;
+        if (ephemeral) void this.release(ptyId);
+        else this.sockets.get(ptyId)?.delete(ws);
       },
     };
   }
@@ -81,15 +90,16 @@ export class TerminalBridge {
   private async open(
     ws: WSContext,
     query: TerminalQuery,
-    onReady: (ptyId: string) => void,
+    onReady: (ptyId: string) => boolean,
   ): Promise<void> {
+    let openingId: string | undefined;
     try {
       if (query.ptyId) {
         const runner = this.runners.get(query.ptyId) ?? this.runnerFor(query.sessionId);
         const attached = await runner.request({ name: "pty.attach", ptyId: query.ptyId });
         this.runners.set(query.ptyId, runner);
         this.attach(query.ptyId, ws);
-        onReady(query.ptyId);
+        if (!onReady(query.ptyId)) return;
         control(ws, { type: "opened", ptyId: query.ptyId, pid: attached.pid, attached: true });
         if (attached.scrollback) ws.send(attached.scrollback);
         if (attached.exited) {
@@ -99,8 +109,10 @@ export class TerminalBridge {
       }
       const ptyId = `pty-${randomUUID()}`;
       const runner = this.runnerFor(query.sessionId);
+      openingId = ptyId;
       this.runners.set(ptyId, runner);
       this.attach(ptyId, ws);
+      const command = query.ephemeral ? query.command : undefined;
       const opened = await runner.request({
         name: "pty.open",
         ptyId,
@@ -108,14 +120,31 @@ export class TerminalBridge {
         cols: query.cols,
         rows: query.rows,
         ...(query.sessionId ? { sessionId: query.sessionId } : {}),
+        ...(command ? commandShell(command) : {}),
       });
-      onReady(ptyId);
+      openingId = undefined;
+      if (!onReady(ptyId)) return;
       control(ws, { type: "opened", ptyId, pid: opened.pid, attached: false });
-      if (query.command)
+      if (query.command && !command)
         await runner.request({ name: "pty.input", ptyId, data: `${query.command}\r` });
     } catch (error) {
+      if (openingId) {
+        this.sockets.delete(openingId);
+        this.runners.delete(openingId);
+      }
       control(ws, { type: "error", message: errorMessage(error) });
       ws.close(1011, "terminal unavailable");
+    }
+  }
+
+  private async release(ptyId: string): Promise<void> {
+    const runner = this.runners.get(ptyId);
+    this.sockets.delete(ptyId);
+    this.runners.delete(ptyId);
+    try {
+      await runner?.request({ name: "pty.close", ptyId });
+    } catch (error) {
+      this.deps.log?.(`Could not close setup terminal: ${errorMessage(error)}`);
     }
   }
 
@@ -150,6 +179,31 @@ export class TerminalBridge {
     const set = this.sockets.get(ptyId) ?? new Set();
     set.add(ws);
     this.sockets.set(ptyId, set);
+  }
+}
+
+/** Start the command without an interactive shell prompt, so its completion ends the PTY. */
+function commandShell(command: string): {
+  shell: string;
+  args: string[];
+  env?: Record<string, string>;
+} {
+  const shell = defaultShell();
+  switch (shellSyntax(shell)) {
+    case "powershell":
+      return {
+        shell,
+        args: ["-NoLogo", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")],
+      };
+    case "cmd":
+      // Keep cmd.exe's quoting out of node-pty's Windows argv escaping.
+      return {
+        shell,
+        args: ["/d", "/s", "/c", "%RISHI_SETUP_COMMAND%"],
+        env: { RISHI_SETUP_COMMAND: command },
+      };
+    case "posix":
+      return { shell, args: ["-c", command] };
   }
 }
 

@@ -60,6 +60,33 @@ describe("Antigravity CLI auth detection", () => {
     );
   });
 
+  it("recognizes the unprefixed Windows Credential Manager target", async () => {
+    run.mockResolvedValueOnce({
+      code: 0,
+      stdout:
+        "Currently stored credentials for gemini:antigravity:\r\n" +
+        "    Target: gemini:antigravity\r\n" +
+        "    Type: Generic\r\n" +
+        "    User: antigravity\r\n" +
+        "    Local machine persistence\r\n",
+      stderr: "",
+      timedOut: false,
+    });
+    await expect(readAgyAuth(home, {}, "win32")).resolves.toEqual(oauth);
+  });
+
+  it("ignores a different Windows target and the cmdkey header", async () => {
+    run.mockResolvedValueOnce({
+      code: 0,
+      stdout:
+        "Currently stored credentials for gemini:antigravity:\r\n" +
+        "    Target: gemini:antigravity-other\r\n",
+      stderr: "",
+      timedOut: false,
+    });
+    await expect(readAgyAuth(home, {}, "win32")).resolves.toEqual(unknown);
+  });
+
   it("checks macOS Keychain metadata and reports unknown when the query fails", async () => {
     run.mockResolvedValueOnce({ code: 0, stdout: "metadata", stderr: "", timedOut: false });
     run.mockResolvedValueOnce({ code: null, stdout: "", stderr: "", timedOut: true });
