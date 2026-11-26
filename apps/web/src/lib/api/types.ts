@@ -42,8 +42,10 @@ export interface TerminalChannel {
 
 export interface OpenTerminalOptions {
   sessionId: string | null;
-  /** Typed into the shell once it starts (e.g. `claude auth login`). */
+  /** Command to run in the shell (e.g. `claude auth login`). */
   command?: string;
+  /** Run the command once, with the terminal owned by this connection. */
+  ephemeral?: boolean;
   /** Re-attach to a terminal opened earlier instead of starting a new one. */
   ptyId?: string;
 }

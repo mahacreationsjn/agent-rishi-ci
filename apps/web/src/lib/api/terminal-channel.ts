@@ -11,6 +11,7 @@ export function openTerminalSocket(baseUrl: string, opts: OpenTerminalOptions): 
   if (opts.sessionId) params.set("sessionId", opts.sessionId);
   if (opts.ptyId) params.set("ptyId", opts.ptyId);
   else if (opts.command) params.set("command", opts.command);
+  if (opts.ephemeral) params.set("ephemeral", "1");
   const ws = new WebSocket(`${baseUrl}/ws/pty?${params}`);
   const dataListeners = new Set<(d: string) => void>();
   const eventListeners = new Set<(e: TerminalEvent) => void>();

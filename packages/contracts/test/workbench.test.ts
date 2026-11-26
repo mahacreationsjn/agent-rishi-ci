@@ -149,5 +149,7 @@ describe("workbench contracts", () => {
     roundTrip(SessionResult, { outcome: "success", summary: "Done", at: ts });
     roundTrip(TerminalClientMessage, { type: "resize", cols: 80, rows: 24 });
     expect(TerminalQuery.parse({ cols: "100" })).toEqual({ cols: 100, rows: 30 });
+    const query = { command: "agy acp --login", ephemeral: "1" };
+    expect(TerminalQuery.parse(JSON.parse(JSON.stringify(query)))).toMatchObject(query);
   });
 });
