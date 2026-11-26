@@ -392,9 +392,13 @@ describe("SetupService", () => {
       return { status, check: status.checks.find((c) => c.id === "antigravity") };
     };
 
-    const signedOut = await run("1.5.18");
-    expect(signedOut.check).toMatchObject({ state: "missing", installed: true, loggedIn: false });
-    expect(signedOut.check?.fix).toEqual({ kind: "login", command: "/bin/agy acp --login" });
+    const unknown = await run("1.5.18");
+    expect(unknown.check).toMatchObject({ state: "warning", installed: true, loggedIn: null });
+    expect(unknown.check?.fix).toEqual({ kind: "login", command: "/bin/agy acp --login" });
+    expect(unknown.status.warnings).toContainEqual({
+      id: "antigravity",
+      message: "Could not confirm the Antigravity CLI login",
+    });
 
     mkdirSync(join(home, ".gemini", "antigravity-cli"), { recursive: true });
     writeFileSync(join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token"), "secret");

@@ -10,9 +10,8 @@ import { loginFix, lookupTool } from "./tool-lookup";
 
 /**
  * Antigravity CLI (§14): a working `agy` (PATH, then `~/.local/bin`, where its installer puts it)
- * of at least the version Agent Rishi supports, then whether it is signed in: its Google sign-in's
- * token file exists (it is never read), or `GEMINI_API_KEY` is set. `agy acp --login` signs in
- * by pasting a code.
+ * of at least the version Agent Rishi supports, then whether there is evidence of a login.
+ * `agy acp --login` signs in by pasting a code.
  */
 export async function checkAntigravity({
   locate,
@@ -44,13 +43,13 @@ export async function checkAntigravity({
       fix: { kind: "upgrade", command: AGY_UPGRADE_COMMAND },
     };
   }
-  const auth = readAgyAuth(userHome ?? undefined, env ?? process.env);
+  const auth = await readAgyAuth(userHome ?? undefined, env ?? process.env, platform);
   if (!auth.loggedIn) {
     return {
       ...installed,
-      loggedIn: false,
-      state: "missing",
-      message: "Not signed in to Antigravity CLI",
+      loggedIn: null,
+      state: "warning",
+      message: "Could not confirm the Antigravity CLI login",
       fix: loginFix("antigravity", shell, tool.path),
     };
   }

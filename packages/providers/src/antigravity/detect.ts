@@ -5,6 +5,7 @@ import type { ProviderIssue, ProviderStatus } from "@agent-rishi/contracts";
 import { brokenInstallMessage, type DetectExeOptions, lookupForDetect } from "../util/detect-exe";
 import type { ResolvedCommand } from "../util/exec";
 import { compareVersions } from "../util/version";
+import { hasAgyKeyringEntry } from "./keyring";
 import type { AgyProbe } from "./probe";
 import { agyDir } from "./settings";
 
@@ -42,25 +43,27 @@ export interface AgyAuth {
 }
 
 /**
- * Its Google sign-in is a token file in its folder (only checked to exist, never read); a
- * `GEMINI_API_KEY` in the environment counts too. Pure apart from the file check.
+ * Look for evidence of a Google sign-in or an API key without reading any stored token.
+ * A missing entry can mean an unsupported or inaccessible keyring, so report unknown.
  */
-export function readAgyAuth(
+export async function readAgyAuth(
   home: string = homedir(),
   env: NodeJS.ProcessEnv = process.env,
-): AgyAuth {
+  platform: NodeJS.Platform = process.platform,
+): Promise<AgyAuth> {
   if (existsSync(path.join(agyDir(home), "antigravity-oauth-token"))) {
     return { loggedIn: true, authMethod: "oauth-personal" };
   }
   if (env.GEMINI_API_KEY?.trim()) return { loggedIn: true, authMethod: "gemini-api-key" };
-  return { loggedIn: false, authMethod: null };
+  if (await hasAgyKeyringEntry(platform)) return { loggedIn: true, authMethod: "oauth-personal" };
+  return { loggedIn: null, authMethod: null };
 }
 
 export interface AgyDetectOptions extends DetectExeOptions {
   /** Start `agy acp` once to check it answers (`probeAgy`); supported versions only. */
   probe?: (exe: ResolvedCommand, version: string | null) => Promise<AgyProbe>;
   /** Reads the login (default `readAgyAuth()`). */
-  auth?: () => AgyAuth;
+  auth?: () => AgyAuth | Promise<AgyAuth>;
 }
 
 /**
@@ -124,7 +127,7 @@ export async function detectAgy(opts: AgyDetectOptions = {}): Promise<ProviderSt
     });
     return { ...found, issues };
   }
-  const auth = (opts.auth ?? (() => readAgyAuth()))();
+  const auth = await (opts.auth?.() ?? readAgyAuth());
   let supported = true;
   const probe = await opts.probe?.(exe, lookup.version);
   if (probe && !probe.acp) {
@@ -139,6 +142,12 @@ export async function detectAgy(opts: AgyDetectOptions = {}): Promise<ProviderSt
     issues.push({
       code: "not_logged_in",
       message: `Antigravity CLI is not signed in. Run \`${AGY_LOGIN_COMMAND}\` and sign in with Google.`,
+      fix: { kind: "login", command: AGY_LOGIN_COMMAND },
+    });
+  } else if (auth.loggedIn === null) {
+    issues.push({
+      code: "detect_failed",
+      message: "Could not confirm the Antigravity CLI login.",
       fix: { kind: "login", command: AGY_LOGIN_COMMAND },
     });
   }
