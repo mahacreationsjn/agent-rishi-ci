@@ -8,7 +8,7 @@ import { AcpRpcError } from "../src/acp/rpc";
 import { AcpPromptChain } from "../src/acp/steering";
 import type { ProviderSession } from "../src/adapter";
 import { AntigravityAdapter } from "../src/antigravity/adapter";
-import { detectAgy, readAgyAuth } from "../src/antigravity/detect";
+import { detectAgy } from "../src/antigravity/detect";
 import { AGY_PLAN_APPROVED, agyArtifact } from "../src/antigravity/extensions";
 import { agentRishiAgySettings } from "../src/antigravity/settings";
 import { validateEventStream } from "../src/replay/validate";
@@ -325,21 +325,21 @@ describe("Antigravity CLI settings and detection", () => {
     });
   });
 
-  it("reads the login from the token file's presence or an API key", () => {
-    expect(readAgyAuth(home, {})).toEqual({ loggedIn: false, authMethod: null });
-    expect(readAgyAuth(home, { GEMINI_API_KEY: "k" })).toMatchObject({ loggedIn: true });
-    const agyHome = join(home, ".gemini", "antigravity-cli");
-    mkdirSync(agyHome, { recursive: true });
-    writeFileSync(join(agyHome, "antigravity-oauth-token"), "");
-    expect(readAgyAuth(home, {})).toEqual({ loggedIn: true, authMethod: "oauth-personal" });
-  });
-
-  it("finds a supported agy and refuses an old one", async () => {
+  it("finds a supported agy and keeps it supported when login cannot be confirmed", async () => {
     const ok = await detectAgy({
       executable: fakeAgy,
       auth: () => ({ loggedIn: true, authMethod: "oauth-personal" }),
     });
     expect(ok).toMatchObject({ installed: true, version: "1.5.18", supported: true, issues: [] });
+    const unknown = await detectAgy({
+      executable: fakeAgy,
+      auth: async () => ({ loggedIn: null, authMethod: null }),
+    });
+    expect(unknown).toMatchObject({
+      supported: true,
+      loggedIn: null,
+      issues: [{ code: "detect_failed", fix: { kind: "login", command: "agy acp --login" } }],
+    });
   });
 });
 
