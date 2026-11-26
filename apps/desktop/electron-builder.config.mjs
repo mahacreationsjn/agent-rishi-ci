@@ -15,9 +15,9 @@
 // frameworks have no Team ID to match. scripts/check-mac-signature.sh verifies the result.
 // Only a Developer ID app can update itself on macOS.
 
-import { existsSync } from "node:fs";
-import { chmod, cp, readdir } from "node:fs/promises";
+import { chmod, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { packStagedDependencies } from "./pack-dependencies.mjs";
 
 /** electron-builder's `Arch` enum values, by name. */
 const ARCH_NAMES = { 0: "ia32", 1: "x64", 2: "armv7l", 3: "arm64", 4: "universal" };
@@ -37,10 +37,13 @@ export function keyringBinary(platform, arch) {
  * - node-pty starts every terminal through a prebuilt `spawn-helper` (macOS, Linux). npm no
  *   longer runs node-pty's install script, which set its executable bit, so terminals failed
  *   with "posix_spawnp failed".
- * - electron-builder leaves out platform binaries of a dependency that don't match the build
- *   machine, so the x64 macOS app (built on Apple silicon) had no keychain binary and kept
- *   API keys in memory only. scripts/package.mjs installs the binary for every target arch
- *   into the stage; copy the one for this arch into the app.
+ * - electron-builder collects node_modules on its own and has left staged packages out: the
+ *   keychain binary for an arch other than the build machine's (the x64 macOS app built on
+ *   Apple silicon kept API keys in memory only), and playwright-core (the runner failed to
+ *   start). Copy every staged package the app lacks that is meant for this platform and arch
+ *   (scripts/package.mjs installs the keychain binary for every target arch into the stage;
+ *   only this arch's goes in), then fail the build if a dependency is still missing
+ *   (pack-dependencies.mjs).
  */
 export async function prepareNativeModules(context) {
   const platform = context.electronPlatformName === "mas" ? "darwin" : context.electronPlatformName;
@@ -53,19 +56,22 @@ export async function prepareNativeModules(context) {
           "Resources",
         )
       : join(context.appOutDir, "resources");
-  const modules = join(resources, "app", "node_modules");
+  const arch = ARCH_NAMES[context.arch];
+  // Dependencies first: a package copied in here (node-pty too) gets the fixes below.
+  const binary = arch === "universal" ? undefined : keyringBinary(platform, arch);
+  await packStagedDependencies({
+    stageDir: context.packager.info.appDir,
+    appDir: join(resources, "app"),
+    target: { platform, arch },
+    extraRequired: binary ? [binary] : [],
+  });
 
+  const modules = join(resources, "app", "node_modules");
   const pty = join(modules, "node-pty");
   const prebuilds = await readdir(join(pty, "prebuilds")).catch(() => []);
   for (const dir of ["build/Release", ...prebuilds.map((d) => `prebuilds/${d}`)]) {
     await chmod(join(pty, dir, "spawn-helper"), 0o755).catch(() => undefined);
   }
-
-  const binary = keyringBinary(platform, ARCH_NAMES[context.arch]);
-  if (!binary || existsSync(join(modules, ...binary.split("/")))) return;
-  const staged = join(context.packager.info.appDir, "node_modules", ...binary.split("/"));
-  if (!existsSync(staged)) throw new Error(`${binary} is not in the staged app (${staged})`);
-  await cp(staged, join(modules, ...binary.split("/")), { recursive: true });
 }
 
 const macSigning = Boolean(process.env.CSC_LINK || process.env.CSC_NAME);

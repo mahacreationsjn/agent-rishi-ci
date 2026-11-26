@@ -86,6 +86,15 @@ async function packedApp() {
   return { config, out, modules, stage, context };
 }
 
+/**
+ * An installed package folder: npm always writes its package.json, which is how the afterPack
+ * dependency check tells a package from a stray folder.
+ */
+function writePackage(dir: string) {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture", version: "1.0.0" }));
+}
+
 describe("native modules in the packed app (afterPack)", () => {
   it.skipIf(process.platform === "win32")("makes node-pty's spawn-helper executable", async () => {
     const { config, out, modules, stage, context } = await packedApp();
@@ -97,7 +106,7 @@ describe("native modules in the packed app (afterPack)", () => {
         writeFileSync(helper, "", { mode: 0o644 });
         return helper;
       });
-      mkdirSync(join(modules, "@napi-rs", "keyring-darwin-x64"), { recursive: true });
+      writePackage(join(modules, "@napi-rs", "keyring-darwin-x64"));
       mkdirSync(stage, { recursive: true });
       await config.prepareNativeModules(context);
       for (const helper of helpers) expect(statSync(helper).mode & 0o777).toBe(0o755);
@@ -110,7 +119,7 @@ describe("native modules in the packed app (afterPack)", () => {
     const { config, out, modules, stage, context } = await packedApp();
     try {
       const staged = join(stage, "node_modules", "@napi-rs", "keyring-darwin-x64");
-      mkdirSync(staged, { recursive: true });
+      writePackage(staged);
       writeFileSync(join(staged, "keyring.darwin-x64.node"), "binary");
       await config.prepareNativeModules(context);
       const copied = join(modules, "@napi-rs", "keyring-darwin-x64", "keyring.darwin-x64.node");
