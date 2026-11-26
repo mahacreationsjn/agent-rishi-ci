@@ -90,7 +90,12 @@ export function TerminalView({
     termRef.current = term;
     const key = `${sessionId ?? "home"}:${slot}`;
     const ptyId = ephemeral ? undefined : attached.get(key);
-    const channel = client.openTerminal({ sessionId, command, ptyId, ephemeral: ephemeral && login });
+    const channel = client.openTerminal({
+      sessionId,
+      command,
+      ptyId,
+      ephemeral: ephemeral && login,
+    });
     const offData = channel.onData((d) => term.write(d));
     const offEvent = channel.onEvent((e) => {
       if (e.type === "opened" && !ephemeral) attached.set(key, e.ptyId);
