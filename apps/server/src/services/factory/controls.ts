@@ -1,0 +1,70 @@
+import type { FactoryLimits, FactoryLoop, Project } from "@agent-rishi/contracts";
+import { badRequest, conflict } from "../errors";
+import type { FactoryContext } from "./context";
+import { hasBudget } from "./policy";
+import { specPending } from "./spec-approval";
+import { readVision } from "./vision";
+
+/** Switching modes and the kill switch (§10.1). */
+
+/**
+ * The software and dark factory need a GitHub project, a vision file and limits with a daily
+ * budget (sent with the switch, or saved while already in a factory mode).
+ */
+export function assertCanEnter(
+  ctx: FactoryContext,
+  project: Project,
+  opts: { limitsSent: boolean; wasFactory: boolean; limits: FactoryLimits },
+): void {
+  if (!ctx.github.isGithubProject(project.id)) {
+    throw conflict("The software and dark factory need a GitHub project", "not_a_github_project");
+  }
+  if (!readVision(project).exists) {
+    throw conflict(`Write the project vision (${project.visionPath}) first`, "vision_required");
+  }
+  if (!opts.limitsSent && !opts.wasFactory) {
+    throw badRequest("Set the factory limits when switching to this mode", "limits_required");
+  }
+  if (!hasBudget(opts.limits)) {
+    throw badRequest("The limits need a daily budget (usd or tokens)", "budget_required");
+  }
+}
+
+/**
+ * Stop now: stop every factory session of the project and put work that hadn't opened a PR back
+ * in the queue. A spec waiting for a person's approval (`spec-approval.ts`) keeps waiting where it
+ * is, with its inbox item: its builder is stopped, and their decision resumes it. The loop record
+ * is the caller's to save (`stoppedLoop`). Returns the stopped ids.
+ */
+export async function stopWork(ctx: FactoryContext, projectId: string): Promise<string[]> {
+  const stopped = await ctx.sessions.stopAll(projectId);
+  for (const item of ctx.store.items(projectId, ["building", "verifying"])) {
+    if (item.stage === "building" && specPending(item)) continue;
+    ctx.store.updateItem(item.id, (i) =>
+      i.stage === "building" && !i.pr
+        ? { ...i, stage: "backlog", builderSessionId: null, note: "Stopped by the kill switch" }
+        : {
+            ...i,
+            reviewerSessionId: i.review ? i.reviewerSessionId : null,
+            note: "Stopped by the kill switch",
+          },
+    );
+  }
+  return stopped;
+}
+
+/** A stopped loop: the scout's round closed and any drain over. */
+export function stoppedLoop(loop: FactoryLoop): FactoryLoop {
+  return { ...loop, state: "stopped", drain: null, scout: { ...loop.scout, round: null } };
+}
+
+/**
+ * The kill switch's Stop now: stop every factory session of the project, put work that hadn't
+ * opened a PR back in the queue, close the scout's round, end a drain and stop the loop. Returns
+ * the stopped ids.
+ */
+export async function haltProject(ctx: FactoryContext, projectId: string): Promise<string[]> {
+  const stopped = await stopWork(ctx, projectId);
+  ctx.store.saveLoop(stoppedLoop(ctx.store.loopOrNew(projectId, ctx.now())));
+  return stopped;
+}

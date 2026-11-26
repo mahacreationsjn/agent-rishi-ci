@@ -1,0 +1,157 @@
+name: CI
+
+# One Linux job: typecheck, lint, the fast test suites, a build, and the published package
+# installed and started the way a user would. That is the bar for every pull request and push
+# to main: the code builds, the core logic holds, and the app installs and runs.
+#
+# Deliberately not here: the real-browser and real-process suites (`pnpm test:slow`), the
+# Playwright e2e suite (`pnpm e2e`) and the desktop smoke test (`pnpm e2e:desktop`). They were
+# slow and the main source of flaky failures; run them locally when working in those areas.
+# The release workflow builds and checks the desktop installers on Windows, macOS and Linux.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a pull request cancels its older, superseded run. Every push to main gets its
+# own group (the run id), so merges in quick succession each get a full run.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+    steps:
+      # A pull request is checked out as its merge commit, whose first parent is the base
+      # branch: `HEAD^1..HEAD` is exactly what the pull request changes.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: What does this change touch?
+        id: detect
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+          echo "Changed files:"; cat "$RUNNER_TEMP/changed.txt"
+          # Documentation: docs/, Markdown files (except the automation templates the server
+          # ships) and images outside apps/ and packages/ (app icons and assets are code).
+          docs='^docs/|^LICENSE$|^[^/]+\.md$|^(apps|packages)/[^/]+/README\.md$|^apps/runner/src/browser/README\.md$|^[^/]+\.(png|jpe?g|gif|svg|webp)$'
+          if [ ! -s "$RUNNER_TEMP/changed.txt" ] || grep -qvE "$docs" "$RUNNER_TEMP/changed.txt"; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Documentation-only change: skipping the checks."
+          fi
+
+  check:
+    name: Build, test and install
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    # About 4 minutes: fail a hang in minutes instead of waiting for GitHub.
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm build
+      - name: Self-update against a local fake registry
+        run: pnpm exec vitest run apps/cli/test/self-update.integration.test.ts
+        env:
+          AGENT_RISHI_REQUIRE_CLI_DIST: "1"
+      - name: Install the packed tarball and run it
+        shell: bash
+        run: |
+          cd apps/cli
+          npm pack --pack-destination "$RUNNER_TEMP"
+          # The Claude Agent SDK is never shipped in the tarball (it is installed on demand).
+          mkdir "$RUNNER_TEMP/tarball" && (cd "$RUNNER_TEMP/tarball" && tar xzf ../agent-rishi-*.tgz)
+          if grep -rlE "Anthropic PBC|Native CLI binary for" "$RUNNER_TEMP/tarball"; then
+            echo "::error::the tarball contains Claude Agent SDK code"; exit 1
+          fi
+          if grep -q "claude-agent-sdk@" "$RUNNER_TEMP/tarball/package/dist/THIRD-PARTY-NOTICES.txt"; then
+            echo "::error::THIRD-PARTY-NOTICES lists the Claude Agent SDK as bundled"; exit 1
+          fi
+          mkdir "$RUNNER_TEMP/install-check" && cd "$RUNNER_TEMP/install-check"
+          npm init -y > /dev/null
+          npm install "$RUNNER_TEMP"/agent-rishi-*.tgz
+          # Pure-JS deps are bundled; only native modules and playwright-core are installed.
+          du -sh node_modules
+          ls node_modules
+          if [ -e node_modules/@anthropic-ai ]; then
+            echo "::error::the packed CLI installed @anthropic-ai packages"; exit 1
+          fi
+          agent-rishi --version
+          export AGENT_RISHI_HOME="$RUNNER_TEMP/agent-rishi-home"
+          agent-rishi doctor --home "$AGENT_RISHI_HOME" | tee doctor.txt || true
+          grep -q "ok  Terminals" doctor.txt
+          grep -q "ok  Keychain" doctor.txt || echo "::warning::keychain module did not load"
+          grep -q -- "--  Claude Code support" doctor.txt
+          # On-demand install of Claude Code support, then doctor loads it and checks the version
+          # (no real session: CI has no `claude`).
+          agent-rishi doctor --install --home "$AGENT_RISHI_HOME" | tee doctor-install.txt || true
+          grep -q "ok  Claude Code support  SDK " doctor-install.txt
+          du -sh "$AGENT_RISHI_HOME/deps"
+          ls "$AGENT_RISHI_HOME/deps/node_modules/@anthropic-ai"
+          if [ "$(ls "$AGENT_RISHI_HOME/deps/node_modules/@anthropic-ai")" != "claude-agent-sdk" ]; then
+            echo "::error::on-demand install added platform binaries or peers"; exit 1
+          fi
+          # Start it like a user would and check the API and the web UI are served.
+          AGENT_RISHI_UPDATE_CHECK=0 agent-rishi --home "$AGENT_RISHI_HOME" --port 4791 --no-open > server.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:4791/api/health > health.json && break
+            sleep 1
+          done
+          cat health.json
+          grep -q '"ok":true' health.json
+          TOKEN=$(tr -d '\r\n' < "$AGENT_RISHI_HOME/install-token")
+          # Responses go to a file before grep reads them: `curl | grep -q` fails the step with
+          # curl's exit 23 when grep finds its match and closes the pipe before curl has written
+          # everything (#539).
+          curl -sf -H "cookie: agent_rishi_token_4791=$TOKEN" http://127.0.0.1:4791/ > index.html
+          grep -q "<title>Agent Rishi" index.html
+          curl -sf -H "authorization: Bearer $TOKEN" http://127.0.0.1:4791/api/automations/templates > templates.json
+          grep -q security-audit templates.json
+          agent-rishi stop --home "$AGENT_RISHI_HOME" || true
+          cat server.log
+
+  # The one check to require in branch protection: green when the check passed, or was skipped
+  # because the change only touches documentation.
+  result:
+    name: CI result
+    needs: [changes, check]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: The check passed or was skipped by change detection
+        shell: bash
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          CODE: ${{ needs.changes.outputs.code }}
+          CHECK: ${{ needs.check.result }}
+        run: |
+          echo "changes: $CHANGES (code: $CODE), check: $CHECK"
+          if [ "$CHANGES" != "success" ]; then
+            echo "::error::Change detection did not succeed"; exit 1
+          fi
+          if [ "$CHECK" = "success" ]; then exit 0; fi
+          if [ "$CHECK" = "skipped" ] && [ "$CODE" = "false" ]; then exit 0; fi
+          echo "::error::The check did not pass ($CHECK)"; exit 1

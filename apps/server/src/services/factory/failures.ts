@@ -1,0 +1,186 @@
+import type { FactoryItem, FactoryLoop, Project } from "@agent-rishi/contracts";
+import { errorMessage } from "../errors";
+import { failedChecks, notAuthorFixable } from "./checks";
+import { type FactoryContext, factoryNotice } from "./context";
+import { stopBeforeAgentTurn } from "./item-budget";
+import { failItem, markStuck } from "./outcomes";
+import { prGone } from "./pr-gone";
+import { fixPrompt, tooLargePrompt } from "./prompts";
+import { MERGE_QUEUED } from "./queue";
+import { repairSlot } from "./rebase";
+import { reviseRoundsAllowed } from "./rereview";
+import { revertBlocked } from "./revert-blocked";
+
+/**
+ * Failed merge checks (§10.1, Review and revise): a revise round when one is allowed, the
+ * PM's call when the work is too large, otherwise the item fails. CI that never started is no
+ * code problem: it is stuck when CI can never run on the repository, and an infrastructure
+ * failure (recovered by itself) otherwise.
+ */
+
+/** Fail the review check with `reason`, then handle it like any failed check. */
+export function failReview(
+  ctx: FactoryContext,
+  project: Project,
+  loop: FactoryLoop,
+  item: FactoryItem,
+  reason: string,
+): Promise<FactoryLoop> {
+  const at = ctx.now().toISOString();
+  const current = ctx.store.updateItem(item.id, (i) => ({
+    ...i,
+    checks: i.checks.map((c) =>
+      c.name === "review" ? { ...c, state: "fail" as const, detail: reason, at } : c,
+    ),
+  }));
+  return handleFailure(ctx, project, loop, current);
+}
+
+/**
+ * Failed checks: a revise round if allowed, otherwise the item fails (and may pause). A builder
+ * session that died is resumed by the revise message; only one a person stopped ends it.
+ */
+export async function handleFailure(
+  ctx: FactoryContext,
+  project: Project,
+  loop: FactoryLoop,
+  item: FactoryItem,
+  /** The base branch, when the PR also has merge conflicts with it. */
+  conflictsWith: string | null = null,
+): Promise<FactoryLoop> {
+  // A PR that merged or closed since the step read it needs no revise round, and isn't failed.
+  if (prGone(ctx, item)) return loop;
+  const failed = failedChecks(item.checks);
+  // CI red on a revert too: the default branch can't be fixed by merging it (`revert-blocked.ts`).
+  const ciRed = failed.find((c) => c.name === "ci" && !notAuthorFixable(c));
+  if (item.source === "revert" && ciRed) {
+    const names = ciRed.detail?.replace(/^CI failed: /, "") ?? "";
+    return revertBlocked(ctx, project, loop, item, `CI failed on the revert too (${names})`);
+  }
+  // A revise round can't make work smaller without cutting scope: the PM splits or allows it.
+  if (failed.some((c) => c.name === "size")) return tooLarge(ctx, project, loop, item);
+  const builder = item.builderSessionId ? ctx.repo.find(item.builderSessionId)?.session : undefined;
+  const fixable =
+    failed.some((c) => !notAuthorFixable(c)) &&
+    // An automatic re-review of a stopped PR brings one more round (`rereview.ts`).
+    item.attempts < reviseRoundsAllowed(item, loop.tuning.maxFixAttempts) &&
+    builder !== undefined &&
+    builder.status !== "stopped" &&
+    item.review?.verdict !== "reject";
+  if (fixable && builder) {
+    // A revise round is an agent turn: an item over its spend cap stops before it.
+    const stopped = await stopBeforeAgentTurn(ctx, project, loop, item);
+    if (stopped) return stopped;
+    // The round wakes a builder between turns: it waits for a free agent, after the reviews
+    // (`slots.ts`), staying in verification with its failed checks until then.
+    if (!repairSlot(ctx, project, item, builder)) {
+      const names = failed.map((c) => c.name).join(", ");
+      const waiting = `Revise round ${item.attempts + 1} (${names}): waiting for a free agent`;
+      ctx.store.updateItem(
+        item.id,
+        (i) => {
+          const { ready: _ready, [MERGE_QUEUED]: _queued, ...nudges } = i.nudges;
+          return { ...i, note: waiting, nudges };
+        },
+        { touch: false },
+      );
+      return loop;
+    }
+    const at = ctx.now().toISOString();
+    ctx.store.updateItem(item.id, (i) => {
+      const { ready: _ready, [MERGE_QUEUED]: _queued, ...nudges } = i.nudges;
+      return {
+        ...i,
+        stage: "building",
+        attempts: i.attempts + 1,
+        review: null,
+        note: `Revise round ${i.attempts + 1}: ${failed.map((c) => c.name).join(", ")}`,
+        nudges: {
+          ...nudges,
+          [`fix_${i.attempts + 1}`]: at,
+          ...(i.reviewerSessionId ? { rereview_pending: at } : {}),
+        },
+      };
+    });
+    await ctx.sessions.message(builder.id, fixPrompt(item, failed, conflictsWith));
+    return loop;
+  }
+  if (failed.length > 0 && failed.every(notAuthorFixable)) return ciNeverStarted(ctx, loop, item);
+  const reason =
+    failed.map((c) => `${c.name}: ${c.detail ?? "failed"}`).join("; ") || "Merge checks failed";
+  if (item.source === "revert") {
+    const why = `its merge checks failed (${reason})`;
+    return revertBlocked(ctx, project, loop, item, why);
+  }
+  const next = failItem(ctx, loop, item, reason);
+  if (item.pr) {
+    await ctx.github
+      .comment(
+        project.id,
+        item.pr.number,
+        `The Agent Rishi factory's checks failed, so this PR is left for a human:\n\n${failed.map((c) => `- **${c.name}**: ${c.detail ?? "failed"}`).join("\n")}\n\nThe factory keeps it free of merge conflicts until it is merged or closed.`,
+      )
+      .catch((error: unknown) => ctx.log?.(`factory: comment: ${errorMessage(error)}`));
+  }
+  return next;
+}
+
+/**
+ * CI never started on the PR's head. With GitHub Actions off (or no active workflow) it never
+ * will: the item is stuck and goes to the user. Otherwise it was a hiccup on GitHub's side: an
+ * infrastructure failure the loop recovers by itself, starting CI again.
+ */
+async function ciNeverStarted(
+  ctx: FactoryContext,
+  loop: FactoryLoop,
+  item: FactoryItem,
+): Promise<FactoryLoop> {
+  const detail = item.checks.find((c) => c.name === "ci")?.detail ?? "CI never started";
+  const actions = await ctx.github.actionsAvailable(item.projectId).catch(() => null);
+  if (actions === false) {
+    return markStuck(
+      ctx,
+      loop,
+      item,
+      `CI can never run on this repository: GitHub Actions are turned off, or no workflow is active (${detail})`,
+      'Turn GitHub Actions (or the workflow) on and retry the item, or turn off "Require CI" in the factory settings.',
+    );
+  }
+  return failItem(ctx, loop, item, `ci: ${detail}`, { kind: "infrastructure" });
+}
+
+/**
+ * The size check failed. That isn't a quality failure, so it doesn't count towards pausing
+ * the loop, and no revise round runs. The PM is woken to split the work into smaller issues
+ * or, when it can't be split, to allow it with `factory_allow_large_change`. The PR stays open.
+ */
+async function tooLarge(
+  ctx: FactoryContext,
+  project: Project,
+  loop: FactoryLoop,
+  item: FactoryItem,
+): Promise<FactoryLoop> {
+  const failed = failedChecks(item.checks);
+  const size = failed.find((c) => c.name === "size");
+  const reason = failed.map((c) => `${c.name}: ${c.detail ?? "failed"}`).join("; ");
+  const next = failItem(ctx, loop, item, reason, { countsAsFailure: false, notify: false });
+  factoryNotice(ctx, {
+    id: `factory.too-large:${item.id}:${item.pr?.number ?? ""}`,
+    projectId: item.projectId,
+    target: "pm",
+    event: "failed",
+    title: `Too large for the factory: ${item.title}`,
+    text: tooLargePrompt(item, size?.detail ?? "over the size limit", failed),
+    itemIds: [item.id],
+  });
+  if (item.pr) {
+    await ctx.github
+      .comment(
+        project.id,
+        item.pr.number,
+        `This PR is larger than the Agent Rishi factory's size limit (${size?.detail ?? "over the limit"}). The project manager will split the work into smaller issues or allow it as one change.`,
+      )
+      .catch((error: unknown) => ctx.log?.(`factory: comment: ${errorMessage(error)}`));
+  }
+  return next;
+}

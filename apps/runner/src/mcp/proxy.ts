@@ -1,0 +1,78 @@
+/**
+ * Local MCP proxy (§4.4). Agents always talk to `http://127.0.0.1:<runnerPort>/mcp`; the
+ * runner forwards Streamable-HTTP MCP traffic (POST with JSON or SSE responses, GET SSE
+ * streams, DELETE to end a session) to the server's `/mcp` with the agent's own
+ * session-scoped bearer token, which the server validates.
+ *
+ * The transport behind the proxy is an `McpUpstream`: `HttpMcpUpstream` for a runner next to
+ * the server, `LinkMcpUpstream` (`./link-upstream.ts`) for one that tunnels over the runner
+ * connection (`docs/remote-runners.md` §11). The agent-facing side is the same for both.
+ */
+
+import { MCP_REQUEST_HEADERS, MCP_RESPONSE_HEADERS } from "@agent-rishi/contracts";
+
+/** Something that can answer a forwarded MCP HTTP request. */
+export interface McpUpstream {
+  forward(request: Request): Promise<Response>;
+}
+
+function pick(source: Headers, names: readonly string[]): Headers {
+  const out = new Headers();
+  for (const name of names) {
+    const value = source.get(name);
+    if (value !== null) out.set(name, value);
+  }
+  return out;
+}
+
+/** Direct HTTP to the server's MCP endpoint (local runners). */
+export class HttpMcpUpstream implements McpUpstream {
+  constructor(readonly url: string) {}
+
+  async forward(request: Request): Promise<Response> {
+    const hasBody = request.method !== "GET" && request.method !== "HEAD";
+    const upstream = await fetch(this.url, {
+      method: request.method,
+      headers: pick(request.headers, MCP_REQUEST_HEADERS),
+      body: hasBody ? await request.arrayBuffer() : undefined,
+      signal: request.signal,
+      redirect: "manual",
+    });
+    return new Response(upstream.body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: pick(upstream.headers, MCP_RESPONSE_HEADERS),
+    });
+  }
+}
+
+/** A JSON-RPC error answer from the proxy itself. */
+export function jsonRpcError(status: number, message: string): Response {
+  return new Response(
+    JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32000, message } }),
+    { status, headers: { "content-type": "application/json" } },
+  );
+}
+
+/**
+ * Handle one agent request to `/mcp`. Requires a bearer token (the session's scoped
+ * token); the upstream decides whether it is valid.
+ */
+export async function handleMcpRequest(
+  request: Request,
+  upstream: McpUpstream | undefined,
+): Promise<Response> {
+  if (!/^Bearer\s+\S+/i.test(request.headers.get("authorization") ?? "")) {
+    return jsonRpcError(401, "Missing session token");
+  }
+  if (!upstream) return jsonRpcError(503, "Agent Rishi MCP endpoint is not configured");
+  try {
+    return await upstream.forward(request);
+  } catch (error) {
+    if (request.signal.aborted) return new Response(null, { status: 499 });
+    return jsonRpcError(
+      502,
+      `Agent Rishi server unreachable (it may be restarting; call the same tool again in a few seconds): ${(error as Error).message}`,
+    );
+  }
+}

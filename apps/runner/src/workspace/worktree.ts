@@ -1,0 +1,303 @@
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
+import type { RunnerCommandOf, RunnerCommandResult, RunnerEvent } from "@agent-rishi/contracts";
+import { CommandError } from "../errors";
+import { restoreFiles, topLevel } from "../git/checkpoints";
+import { git, gitOk, gitText, isWorkTree } from "../git/exec";
+import { currentBranch, defaultBranch } from "../git/ops";
+import type { ProcessSupervisor } from "../process/supervisor";
+import { endProcessesInside } from "../process/worktree-processes";
+import { prepareClone } from "./clone";
+import { PROJECT_CONFIG_PATH, readProjectConfig } from "./project-config";
+import { pruneWorktrees, removeWorkspace, worktreeState } from "./removal";
+import { runSetup, type SetupStep } from "./setup";
+import { discardFolder, isManagedWorktreePath } from "./trash";
+
+export interface WorkspaceContext {
+  home: string;
+  supervisor: ProcessSupervisor;
+  emit: (event: RunnerEvent) => void;
+}
+
+/** Short, path-safe form of a session id (worktree directory and default branch name). */
+export function sessionShort(sessionId: string): string {
+  const cleaned = sessionId.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (cleaned.length >= 4) return cleaned.slice(0, 8);
+  return createHash("sha256").update(sessionId).digest("hex").slice(0, 8);
+}
+
+/** Project slug from a repo path when the server didn't send one. */
+export function slugFromPath(repoPath: string): string {
+  const slug = basename(resolve(repoPath))
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  return slug || "project";
+}
+
+/** The project folder of a strategy that needs one (the schema requires it for all but `clone`). */
+function repoPathOf(cmd: RunnerCommandOf<"workspace.prepare">): string {
+  if (!cmd.repoPath) throw new CommandError("bad_request", "repoPath is required");
+  return cmd.repoPath;
+}
+
+function branchExists(cwd: string, branch: string): Promise<boolean> {
+  return gitOk(cwd, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+}
+
+async function uniqueBranch(cwd: string, wanted: string): Promise<string> {
+  if (!(await branchExists(cwd, wanted))) return wanted;
+  for (let i = 2; i < 100; i++) {
+    const candidate = `${wanted}-${i}`;
+    if (!(await branchExists(cwd, candidate))) return candidate;
+  }
+  throw new CommandError("branch_exists", `No free branch name for ${wanted}`);
+}
+
+/**
+ * The ref a new worktree branches from: `cmd.baseRef`, else the repository's default branch.
+ * After a successful `fetch`, a local branch with nothing of its own is swapped for its freshly
+ * fetched `origin/` copy (see `freshestBase`). A failed fetch (offline) keeps the local ref.
+ */
+async function resolveBase(
+  repo: string,
+  cmd: RunnerCommandOf<"workspace.prepare">,
+): Promise<string> {
+  let fetched = false;
+  const hasOrigin = await gitOk(repo, ["remote", "get-url", "origin"]);
+  if (cmd.fetch && hasOrigin) {
+    fetched = await git(repo, ["fetch", "--prune", "origin"], { timeoutMs: 120_000 }).then(
+      () => true,
+      () => false,
+    );
+  }
+  const base = cmd.baseRef ?? (await defaultBranch(repo)) ?? "HEAD";
+  return fetched ? freshestBase(repo, base) : base;
+}
+
+/**
+ * `origin/<base>` when the local branch `<base>` is behind it or equal (an ancestor), or
+ * missing; otherwise `base`. A local branch that is ahead or has diverged is kept: its own
+ * commits are the user's. Refs that aren't plain branch names (`origin/x`, a commit, `HEAD`)
+ * are returned as they are.
+ */
+export async function freshestBase(repo: string, base: string): Promise<string> {
+  if (base === "HEAD" || base.startsWith("origin/")) return base;
+  const remote = `refs/remotes/origin/${base}`;
+  if (!(await gitOk(repo, ["rev-parse", "--verify", "--quiet", remote]))) return base;
+  if (!(await branchExists(repo, base))) return `origin/${base}`;
+  const behind = await gitOk(repo, ["merge-base", "--is-ancestor", `refs/heads/${base}`, remote]);
+  return behind ? `origin/${base}` : base;
+}
+
+function isEmptyDir(path: string): boolean {
+  try {
+    return readdirSync(path).length === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Make `path` ready for `git worktree add`: reuse a worktree of this repository, delete the
+ * orphan folder an interrupted removal left inside `<home>/wt` (stopping processes in it
+ * first), and drop git's stale record of it. Returns the worktree to reuse, if any.
+ */
+async function clearTarget(
+  repo: string,
+  path: string,
+  ctx: WorkspaceContext,
+): Promise<{ cwd: string; branch: string | null; created: boolean } | null> {
+  const info = await worktreeState(repo, path);
+  if (info.state === "registered") {
+    return { cwd: path, branch: await currentBranch(path), created: false };
+  }
+  if (info.state === "orphan" && isManagedWorktreePath(ctx.home, path) && !info.containsOther) {
+    await ctx.supervisor.killUnder(path);
+    await endProcessesInside(path, { home: ctx.home, removing: true });
+    await discardFolder(ctx.home, path);
+  } else if (info.state !== "missing" && !isEmptyDir(path)) {
+    throw new CommandError("path_exists", `${path} exists and is not a worktree`);
+  }
+  if (info.registered) await pruneWorktrees(repo);
+  return null;
+}
+
+async function createWorktree(
+  cmd: RunnerCommandOf<"workspace.prepare">,
+  ctx: WorkspaceContext,
+): Promise<{ cwd: string; branch: string | null; created: boolean; newBranch?: boolean }> {
+  const repoPath = repoPathOf(cmd);
+  const repo = await topLevel(repoPath).catch(() => {
+    throw new CommandError("not_a_repo", `${repoPath} is not a git repository`);
+  });
+  const short = sessionShort(cmd.sessionId);
+  const slug = cmd.projectSlug ?? slugFromPath(repo);
+  const path = resolve(cmd.path ?? join(ctx.home, "wt", slug, short));
+  const reuse = await clearTarget(repo, path, ctx);
+  if (reuse) return reuse;
+  await mkdir(dirname(path), { recursive: true });
+  const base = await resolveBase(repo, cmd);
+  if (cmd.detachedCommit) {
+    const commit = `${cmd.detachedCommit}^{commit}`;
+    if (cmd.fetch && !(await gitOk(repo, ["cat-file", "-e", commit]))) {
+      await git(repo, ["fetch", "--no-tags", "origin", cmd.detachedCommit], {
+        timeoutMs: 120_000,
+      }).catch(() => undefined);
+    }
+    if (!(await gitOk(repo, ["cat-file", "-e", commit]))) {
+      throw new CommandError(
+        "review_commit_unavailable",
+        `Review commit ${cmd.detachedCommit} is unavailable after fetching origin`,
+      );
+    }
+    await git(repo, ["worktree", "add", "--detach", path, cmd.detachedCommit], {
+      timeoutMs: 10 * 60_000,
+    });
+    return { cwd: path, branch: null, created: true };
+  }
+  if (cmd.branch && (await branchExists(repo, cmd.branch))) {
+    await git(repo, ["worktree", "add", path, cmd.branch], { timeoutMs: 10 * 60_000 });
+    return { cwd: path, branch: cmd.branch, created: true };
+  }
+  const branch = cmd.branch ?? (await uniqueBranch(repo, `agent-rishi/${short}`));
+  await git(repo, ["worktree", "add", "--no-track", "-b", branch, path, base], {
+    timeoutMs: 10 * 60_000,
+  });
+  return { cwd: path, branch, created: true, newBranch: true };
+}
+
+/**
+ * Give a new fork worktree its source's checkpoint (§9). If that fails, the worktree (and the
+ * branch, when it was just made) is removed again, so a later attempt starts clean and
+ * restores instead of reusing a worktree that never got the source's files.
+ */
+async function restoreForkStart(
+  cmd: RunnerCommandOf<"workspace.prepare">,
+  target: { cwd: string; branch: string | null; newBranch?: boolean },
+  ctx: WorkspaceContext,
+): Promise<void> {
+  const from = cmd.restoreCheckpoint;
+  if (!from) return;
+  try {
+    await restoreFiles(target.cwd, from.sessionId, from.index);
+  } catch (error) {
+    const undo = {
+      name: "workspace.remove" as const,
+      repoPath: repoPathOf(cmd),
+      path: target.cwd,
+      force: true,
+      ...(target.newBranch && target.branch ? { deleteBranch: target.branch } : {}),
+    };
+    await removeWorkspace(undo, ctx.home).catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
+ * `workspace.prepare` (§9): resolve the session's working directory (repo root, an existing
+ * worktree, a new worktree under `<home>/wt/<slug>/<short>` on a new branch, or a clone under
+ * `<home>/ws/<short>` for a runner that doesn't share the server's disk), restore a
+ * forked session's starting checkpoint into a new one, then run `.agent-rishi/project.json` setup
+ * (new worktrees and clones only) and the explicit setup commands. Project setup that matches
+ * none of `seenSetups` is held instead (`heldSetup`): it came from a change no person has seen.
+ */
+export async function prepareWorkspace(
+  cmd: RunnerCommandOf<"workspace.prepare">,
+  ctx: WorkspaceContext,
+): Promise<RunnerCommandResult<"workspace.prepare">> {
+  let target: { cwd: string; branch: string | null; created: boolean };
+  switch (cmd.strategy) {
+    case "repo_root": {
+      const repoPath = repoPathOf(cmd);
+      if (!existsSync(repoPath)) throw new CommandError("not_found", `${repoPath} not found`);
+      const isRepo = await isWorkTree(repoPath);
+      const cwd = isRepo ? await topLevel(repoPath) : resolve(repoPath);
+      target = { cwd, branch: isRepo ? await currentBranch(cwd) : null, created: false };
+      break;
+    }
+    case "existing": {
+      if (!cmd.path || !existsSync(cmd.path)) {
+        throw new CommandError("not_found", `Existing worktree ${cmd.path ?? "(none)"} not found`);
+      }
+      if (!(await isWorkTree(cmd.path))) {
+        throw new CommandError("not_a_repo", `${cmd.path} is not a git worktree`);
+      }
+      target = { cwd: resolve(cmd.path), branch: await currentBranch(cmd.path), created: false };
+      break;
+    }
+    case "worktree": {
+      const { newBranch, ...made } = await createWorktree(cmd, ctx);
+      // A fork starts where its source left off: that checkpoint's files, uncommitted, on top
+      // of the branch. Only on creation, so a retried start never overwrites the fork's work.
+      if (made.created) await restoreForkStart(cmd, { ...made, newBranch }, ctx);
+      target = made;
+      break;
+    }
+    case "clone":
+      target = await prepareClone(cmd, ctx.home, sessionShort(cmd.sessionId));
+      break;
+  }
+
+  const { config, error } = await readProjectConfig(target.cwd);
+  if (error) {
+    ctx.emit({
+      kind: "workspace.setup",
+      sessionId: cmd.sessionId,
+      status: "failed",
+      command: ".agent-rishi/project.json",
+      output: error,
+    });
+  }
+  const project = target.created && cmd.runProjectSetup !== false ? (config?.setup ?? []) : [];
+  const held = project.length > 0 && !seen(project, cmd.seenSetups);
+  const commands = [...(held ? [] : project), ...cmd.setupCommands];
+  let setup: SetupStep[] = [];
+  if (commands.length > 0) {
+    setup = await runSetup({
+      sessionId: cmd.sessionId,
+      cwd: target.cwd,
+      commands,
+      supervisor: ctx.supervisor,
+      emit: ctx.emit,
+    });
+  }
+  if (
+    cmd.detachedCommit &&
+    ((await currentBranch(target.cwd)) !== null ||
+      (await gitText(target.cwd, ["rev-parse", "HEAD"])) !== cmd.detachedCommit.toLowerCase())
+  ) {
+    throw new CommandError(
+      "review_checkout_mismatch",
+      "Review workspace is not detached at the requested commit",
+    );
+  }
+  if (!held) return { ...target, config, setup };
+  return {
+    ...target,
+    config,
+    setup,
+    heldSetup: { commands: project, ...(await lastChange(target.cwd)) },
+  };
+}
+
+/** Whether a person has seen this setup (`seenSetups`; none given: no gate). */
+function seen(commands: readonly string[], seenSetups: readonly string[][] | undefined): boolean {
+  if (!seenSetups) return true;
+  return seenSetups.some(
+    (list) => list.length === commands.length && list.every((c, i) => c === commands[i]),
+  );
+}
+
+/** The last commit that changed `.agent-rishi/project.json` here (for "changed in #N"). */
+async function lastChange(cwd: string): Promise<{ commit: string | null; subject: string | null }> {
+  const out = await git(cwd, ["log", "-1", "--format=%h%x00%s", "--", PROJECT_CONFIG_PATH]).then(
+    (r) => r.stdout.toString("utf8").trim(),
+    () => "",
+  );
+  const [commit, subject] = out.split("\0");
+  return { commit: commit || null, subject: subject || null };
+}

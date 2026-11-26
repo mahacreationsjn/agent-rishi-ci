@@ -1,0 +1,269 @@
+import {
+  type FactoryItem,
+  type FactoryLoop,
+  isFactoryMode,
+  type Project,
+  type ReviewVerdict,
+} from "@agent-rishi/contracts";
+import { errorMessage } from "../errors";
+import { settleApproval, verdictHead } from "./approval";
+import { codeFiles, evaluateChecks, hasTestResults, sameChecks } from "./checks";
+import { CI_KICK_NUDGE, kickCi } from "./ci-kick";
+import { type FactoryContext, visionOf } from "./context";
+import { handleFailure } from "./failures";
+import type { FactoryPr, PrEvidence } from "./github-port";
+import { inheritedCi } from "./inherited-ci";
+import { stopBeforeAgentTurn } from "./item-budget";
+import { prDecidedOutside, readyForYou, readyInboxId } from "./merge";
+import { escalate, failItem, runAudit } from "./outcomes";
+import { changedPaths, isUiFile, withVisionFile } from "./policy";
+import { decidedPr } from "./pr-gone";
+import { joinQueue, leaveQueue } from "./queue";
+import {
+  advanceConflicting,
+  baseBranchOf,
+  restoreForAudit,
+  settleConflict,
+  trackedHead,
+  trackHead,
+  UPDATE,
+  worktreeSettled,
+} from "./rebase";
+import { adoptAgentPr } from "./rebuild";
+import { recheckCause } from "./recheck";
+import { checkRevert } from "./revert";
+import { ensureReviewer, reviewerStalled } from "./reviewer";
+import { endStopped, stoppedOnPurpose } from "./stops";
+import { mayAutoMerge } from "./trust";
+
+/** Audit results per item and head commit (re-run after a restart is fine). */
+const auditCache = new Map<string, { ok: boolean; detail: string }>();
+/** Evidence found per item and head commit (only what was found; misses are looked up again). */
+const evidenceCache = new Map<string, PrEvidence>();
+
+/** How often a PR that is ready for a person is read from GitHub again (new commits, CI). */
+export const READY_RECHECK_MS = 5 * 60_000;
+
+/**
+ * One verification step for an item with a PR (§10.1, Review and Merge): gather the inputs,
+ * record the merge checks, start or nudge the independent reviewer, then queue it to merge
+ * (auto-merge on, trusted work; `queue.ts` merges) or hand it to the user to merge, start a
+ * revise round, fail or escalate.
+ */
+export async function advanceVerifying(
+  ctx: FactoryContext,
+  project: Project,
+  loop: FactoryLoop,
+  item: FactoryItem,
+): Promise<FactoryLoop> {
+  if (!item.pr) return failItem(ctx, loop, item, "The item has no pull request");
+  item = adoptAgentPr(ctx, project, item);
+  if (!item.pr) return loop;
+  // Its builder or reviewer stopped on purpose, with a reason: that call, never a failure
+  // (`stops.ts`). A PR merged or closed meanwhile is settled below as usual.
+  if (stoppedOnPurpose(ctx, item) && !decidedPr(ctx, item)) return endStopped(ctx, loop, item);
+  // Ready and waiting for a person: the synced PR says when they merge or close it; GitHub
+  // itself is asked again only every few minutes (new commits, CI, conflicts).
+  if (item.nudges.ready && !mayAutoMerge(item, project.factoryLimits)) {
+    const ref = ctx.github.prRef(project.id, item.pr.number);
+    if (ref && (ref.state === "merged" || ref.state === "closed")) {
+      prDecidedOutside(ctx, item, ref);
+      return loop;
+    }
+    const last = Date.parse(item.nudges.ready_checked ?? item.nudges.ready);
+    if (ctx.now().getTime() - last < READY_RECHECK_MS) return loop;
+    const at = ctx.now().toISOString();
+    ctx.store.updateItem(item.id, (i) => ({ ...i, nudges: { ...i.nudges, ready_checked: at } }));
+  }
+  let pr: FactoryPr;
+  try {
+    pr = await ctx.github.prDetails(project.id, item.pr.number);
+  } catch (error) {
+    ctx.store.updateItem(item.id, (i) => ({
+      ...i,
+      note: `Could not read the PR: ${errorMessage(error)}`,
+    }));
+    return loop;
+  }
+  if (pr.ref.state === "merged" || pr.ref.state === "closed") {
+    prDecidedOutside(ctx, item, pr.ref);
+    return loop;
+  }
+  const mergeWait =
+    pr.ref.state === "draft"
+      ? "Waiting for the PR author to mark the draft ready for review"
+      : pr.mergeState === "blocked" && (pr.checks === "none" || pr.checks === "pending")
+        ? "Waiting for required GitHub checks or branch rules to clear. See the pull request for the pending requirements."
+        : null;
+  if (mergeWait) {
+    leaveQueue(ctx, item);
+    if (item.mergeWait !== mergeWait || item.pr.state !== pr.ref.state || item.nudges.ready) {
+      ctx.store.updateItem(item.id, (i) => {
+        const { ready: _ready, ready_checked: _checked, ...nudges } = i.nudges;
+        return { ...i, pr: pr.ref, mergeWait, note: null, nudges };
+      });
+    }
+    const decision = ctx.inbox.find(readyInboxId(item.id));
+    if (decision?.status === "open") ctx.inbox.close(decision, "resolved", { note: mergeWait });
+    return loop;
+  }
+  if (item.mergeWait) {
+    item = ctx.store.updateItem(item.id, (i) => ({ ...i, mergeWait: null }));
+  }
+  // What it changes, for overlap-aware scheduling of the queue (`overlap.ts`).
+  ctx.prFiles.set(project.id, pr.ref.number, pr.files);
+  // Work over its spend cap moves on through the steps that start no agent turn (CI, the merge
+  // queue, update-branch, the merge) and stops before one that would (`item-budget.ts`).
+  const beforeAgentTurn = (current: FactoryItem) =>
+    stopBeforeAgentTurn(ctx, project, loop, current);
+  // CI that never started is started again (by its agent, or an integrator that takes the PR
+  // over when the author's session is gone); its clock waits until that happened.
+  if (item.nudges[CI_KICK_NUDGE]) {
+    const stopped = await beforeAgentTurn(item);
+    if (stopped) return stopped;
+  }
+  const kicking = await kickCi(ctx, project, loop, item, pr);
+  item = ctx.store.item(item.id) ?? item;
+  // The PR merged or closed since it was read (`prGone`): the item is finished already.
+  if (item.stage !== "verifying") return loop;
+
+  const vision = visionOf(project);
+  const now = ctx.now();
+  const conflicting = pr.mergeable === "conflicting";
+  const builder = item.builderSessionId ? ctx.repo.find(item.builderSessionId)?.session : undefined;
+  const worktree = builder?.worktreePath ?? null;
+  const auditConfigured = Boolean(loop.tuning.auditCommand && worktree);
+  const headKey = `${item.id}:${pr.headSha ?? ""}`;
+  carryAuditOver(item, pr, headKey);
+  // The audit runs in the builder's settled worktree: not once cleanup removed it, not while
+  // the builder is mid-turn, and not on a head a rebase is about to replace. Until then it is
+  // pending (still required before a merge), never skipped.
+  const auditable = builder !== undefined && worktreeSettled(builder) && !conflicting;
+  if (auditable && worktree && loop.tuning.auditCommand && !auditCache.has(headKey)) {
+    auditCache.set(headKey, await runAudit(ctx, loop.tuning.auditCommand, worktree));
+  }
+  const evidence = await gatherEvidence(ctx, project, item, pr, headKey);
+  // An exact revert's automated check stands in for the agent review (`revert.ts`).
+  const checked = await checkRevert(ctx, project, item, pr);
+  if (!checked) return loop;
+  item = checked;
+  // CI gets its time from when this head first appeared, not from when verification began. An
+  // approval covers one head: a new head keeps it only with the same change (`approval.ts`).
+  const at = now.toISOString();
+  const nudgesFor = (n: FactoryItem["nudges"], review: ReviewVerdict | null) => {
+    const tracked = settleConflict(trackHead(n, pr, at).nudges, pr, Boolean(review));
+    return settleApproval(n, tracked, pr, review, at);
+  };
+  const head = trackHead(item.nudges, pr, at);
+  const settled = { nudges: nudgesFor(item.nudges, item.review) };
+  // Red CI that fails only what fails on the default branch waits for it (`inherited-ci.ts`).
+  const ciInherited = await inheritedCi(ctx, project, item, pr);
+  const { checks, outcome } = evaluateChecks({
+    pr,
+    issueTitle: item.issue?.title ?? item.title,
+    review: item.review,
+    approvedHead: verdictHead(settled),
+    recheck: recheckCause(settled),
+    reviewer: item.reviewerProvider,
+    type: item.type,
+    evidence: evidence.screenshots,
+    testOutput: evidence.testOutput,
+    audit: auditCache.get(headKey) ?? null,
+    auditConfigured,
+    ciTimedOut: !kicking && now.getTime() - Date.parse(head.since) > ctx.ciGraceMs,
+    ciInherited,
+    limits: project.factoryLimits,
+    tuning: loop.tuning,
+    largeChange: item.largeChange ?? null,
+    revert: item.source === "revert",
+    areas: withVisionFile(vision.parsed.protectedAreas, project.visionPath),
+    now: now.toISOString(),
+  });
+  let current = ctx.store.updateItem(item.id, (i) => ({
+    ...i,
+    pr: pr.ref,
+    checks: sameChecks(i.checks, checks) ? i.checks : checks,
+    nudges: nudgesFor(i.nudges, i.review),
+  }));
+
+  if (outcome === "escalate") return escalate(ctx, loop, current, checks);
+  if (outcome === "fail") {
+    return handleFailure(ctx, project, loop, current, conflicting ? baseBranchOf(project) : null);
+  }
+  if (outcome === "pending") {
+    // Merge conflicts (another merge came first): the PR's agent rebases, then CI runs again.
+    // A review in progress still counts; a new one waits for the rebased head.
+    if (conflicting) {
+      return (
+        (await beforeAgentTurn(current)) ?? advanceConflicting(ctx, project, loop, current, pr)
+      );
+    }
+    // The audit is due but cleanup removed the builder's worktree: bring it back first.
+    if (auditConfigured && builder?.worktreeRemovedAt && !auditCache.has(headKey)) {
+      return (
+        (await beforeAgentTurn(current)) ??
+        restoreForAudit(ctx, project, loop, current, builder, pr.headSha)
+      );
+    }
+    const review = checks.find((c) => c.name === "review")?.state;
+    if (review === "skipped") return loop;
+    // An approval that covers this head waits on CI alone; any other review takes an agent's turn.
+    if (review !== "pass") {
+      const stopped = await beforeAgentTurn(current);
+      if (stopped) return stopped;
+    }
+    current = await ensureReviewer(ctx, project, loop, current, vision.text, pr);
+    return reviewerStalled(ctx, project, loop, current);
+  }
+
+  // Every check passed: the merge queue merges it in its turn, or a person does.
+  if (!mayAutoMerge(current, project.factoryLimits) || !isFactoryMode(project.autonomyMode)) {
+    current = leaveQueue(ctx, current);
+    await readyForYou(ctx, project, current);
+    return loop;
+  }
+  joinQueue(ctx, current);
+  return loop;
+}
+
+/**
+ * A head the merge queue made with GitHub's update-branch only merged the default branch in:
+ * the audit result of the head before it still holds (it ran in the builder's worktree).
+ */
+function carryAuditOver(item: FactoryItem, pr: FactoryPr, headKey: string): void {
+  const prev = trackedHead(item);
+  if (!prev || prev === pr.headSha || !item.nudges[`${UPDATE}${prev}`]) return;
+  const was = auditCache.get(`${item.id}:${prev}`);
+  if (was && !auditCache.has(headKey)) auditCache.set(headKey, was);
+}
+
+/** Screenshots (UI changes) and test output (code changes), cached once found. */
+async function gatherEvidence(
+  ctx: FactoryContext,
+  project: Project,
+  item: FactoryItem,
+  pr: FactoryPr,
+  headKey: string,
+): Promise<{ screenshots: boolean | null; testOutput: boolean | null }> {
+  // A revert needs neither: its own CI is its evidence (`checks.ts`).
+  const revert = item.source === "revert";
+  // The same paths the checks read (a rename's old path too), or a check would wait for evidence
+  // nobody looks up.
+  const paths = changedPaths(pr);
+  const wantScreens = !revert && paths.some(isUiFile);
+  const wantTests = !revert && codeFiles(paths).length > 0 && !hasTestResults(pr.body);
+  if (!wantScreens && !wantTests) return { screenshots: null, testOutput: null };
+  let found = evidenceCache.get(headKey);
+  if (!found || (wantScreens && !found.screenshots) || (wantTests && !found.testOutput)) {
+    const looked = await ctx.github
+      .evidence(project.id, pr.ref.number, item.issue?.number ?? null)
+      .catch(() => null);
+    if (!looked) return { screenshots: null, testOutput: null };
+    found = looked;
+    if (found.screenshots || found.testOutput) evidenceCache.set(headKey, found);
+  }
+  return {
+    screenshots: wantScreens ? found.screenshots : null,
+    testOutput: wantTests ? found.testOutput : false,
+  };
+}

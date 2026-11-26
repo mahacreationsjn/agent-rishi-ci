@@ -1,0 +1,33 @@
+{
+  "name": "agent-rishi-monorepo",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.12.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @agent-rishi/server --filter @agent-rishi/web run dev",
+    "build": "pnpm -r --filter=!agent-rishi-monorepo run build",
+    "typecheck": "pnpm -r run typecheck",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:slow": "vitest run --mode slow",
+    "e2e": "pnpm build && pnpm --filter @agent-rishi/web e2e",
+    "desktop:dev": "pnpm --filter @agent-rishi/web build && pnpm --filter @agent-rishi/desktop build && pnpm --filter @agent-rishi/desktop dev",
+    "desktop:build": "pnpm build && pnpm --filter @agent-rishi/desktop package --dir",
+    "desktop:dist": "pnpm build && pnpm --filter @agent-rishi/desktop package",
+    "e2e:desktop": "pnpm desktop:build && pnpm --filter @agent-rishi/desktop e2e",
+    "db:generate": "pnpm --filter @agent-rishi/server run db:generate",
+    "changelog:preview": "node scripts/release/bump-version.mjs patch --dry-run"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.6",
+    "@types/node": "^24.19.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}

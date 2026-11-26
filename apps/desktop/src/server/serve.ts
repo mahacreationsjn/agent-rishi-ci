@@ -1,0 +1,95 @@
+import {
+  AGENT_RISHI_VERSION,
+  DesktopHostMessage,
+  type DesktopServerMessage,
+} from "@agent-rishi/contracts";
+import { ensureHome, ensureInstallToken, resolveHome, startServer } from "@agent-rishi/server";
+import { serverLog } from "./log";
+import { IpcDesktopUpdater } from "./update-bridge";
+
+/** How long a server whose app went away gets to close before it exits anyway. */
+const ORPHAN_CLOSE_MS = 30_000;
+
+/**
+ * Start the server for the desktop app and connect it to the main process: report `ready`,
+ * mirror the updater, and close on `shutdown` (with the runner when asked, as `agent-rishi stop`
+ * does) or when the main process goes away (the runner keeps running).
+ */
+export async function serve(opts: { home?: string; port: number; fake: boolean }): Promise<void> {
+  const send = (message: DesktopServerMessage) => process.send?.(message);
+  const home = resolveHome(opts.home);
+  const paths = ensureHome(home);
+  const token = ensureInstallToken(paths.token);
+  const desktop = new IpcDesktopUpdater(send, AGENT_RISHI_VERSION);
+  let closing = false;
+
+  const server = await startServer({
+    port: opts.port,
+    dataDir: home,
+    token,
+    enableFakeProvider: opts.fake || process.env.AGENT_RISHI_FAKE_PROVIDER === "1",
+    onShutdownStart: () => {
+      closing = true;
+    },
+    onShutdownRequest: (exitCode) => {
+      console.log(`server: shutdown requested through the API (code ${exitCode})`);
+      process.exit(exitCode);
+    },
+    selfUpdate: {
+      source: "desktop",
+      restartCommand: "Quit Agent Rishi from the tray and open it again",
+      launcherVersion: AGENT_RISHI_VERSION,
+      desktop,
+    },
+    log: serverLog(),
+  });
+
+  const close = (stopRunner: boolean) => {
+    if (closing) return;
+    closing = true;
+    // Commands still waiting (an install in progress) end with this process, not with an error.
+    void server.close({ stopRunner }).then(
+      () => process.exit(0),
+      (error: unknown) => {
+        console.error(error);
+        process.exit(1);
+      },
+    );
+  };
+  process.on("message", (raw) => {
+    const parsed = DesktopHostMessage.safeParse(raw);
+    if (!parsed.success) return;
+    if (parsed.data.type === "shutdown") close(parsed.data.stopRunner);
+    else desktop.handle(parsed.data);
+  });
+  // The app quit or crashed without asking: close; the runner keeps the agents going. Nobody
+  // is left to stop this process if closing hangs, so it exits on its own after a while.
+  process.on("disconnect", () => {
+    close(false);
+    setTimeout(() => process.exit(0), ORPHAN_CLOSE_MS).unref();
+  });
+  // A signal while already closing means the app gave up waiting: exit now.
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => {
+      console.log(`server: received ${signal}`);
+      if (closing) process.exit(1);
+      close(false);
+    });
+  }
+
+  console.log(`Agent Rishi ${AGENT_RISHI_VERSION} is running at ${server.url}`);
+  // Network access (§15.1) works the same as with \`agent-rishi\`: the server moves only its HTTP
+  // listener when it is switched, so the app and the runner carry on.
+  if (server.network.enabled) {
+    for (const address of server.network.addresses()) {
+      console.log(`  ${address.label}: ${address.url}`);
+    }
+  }
+  send({
+    type: "ready",
+    url: server.url,
+    port: server.port,
+    launchUrl: server.launchUrl,
+    version: AGENT_RISHI_VERSION,
+  });
+}

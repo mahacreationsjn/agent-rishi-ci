@@ -1,0 +1,442 @@
+import { existsSync } from "node:fs";
+import type {
+  AgentEvent,
+  RunnerCommandOf,
+  RunnerEvent,
+  RunnerSessionInfo,
+} from "@agent-rishi/contracts";
+import {
+  type ProviderRegistry,
+  type ProviderSession,
+  ProviderSessionError,
+} from "@agent-rishi/providers";
+import { CommandError } from "./errors";
+import { createCheckpoint, nextCheckpointIndex } from "./git/checkpoints";
+import { cwdMissing, isWorkTree } from "./git/exec";
+import { agentSessionOptions } from "./session-env";
+
+export { CommandError };
+
+interface Hosted {
+  providerId: string;
+  session: ProviderSession;
+  state: RunnerSessionInfo["state"];
+  rootThreadId: string | undefined;
+  cwd: string;
+  checkpoints: boolean;
+  /** Serializes checkpoint writes for this session. */
+  checkpointChain: Promise<void>;
+  /** Why the session is closing, reported with its exit event. */
+  closeReason?: "stopped" | "runner_exit";
+  /** A running turn was interrupted by a drain: report it as a runner restart. */
+  drainInterrupted: boolean;
+  /** A root turn was running when the runner started closing the session. */
+  turnCutOff: boolean;
+  /** `compact` asked for a compaction: the next root turn to start is it (`kind: "compact"`). */
+  compactPending?: boolean;
+  /** The root turn compacting the conversation now, if one is. */
+  compactTurnId?: string;
+}
+
+/** A steer during a compaction (the server answers the same when it knows first). */
+const COMPACTING =
+  "The conversation is being compacted, so there is no turn to steer. Send the message instead: it waits in the queue and goes once the compaction ends.";
+
+export interface SessionHostOptions {
+  log?: (message: string) => void;
+}
+
+/**
+ * Owns live provider sessions on this runner and pumps their normalized events into the
+ * journal (via `emit`). Sessions outlive server connections. Any number run concurrently.
+ * When the cwd is a git work tree, the host writes turn checkpoints (§9): a baseline when
+ * the session starts and one after every root-thread turn ends.
+ */
+export class SessionHost {
+  private readonly sessions = new Map<string, Hosted>();
+  /** Sessions a `start` is opening, until they are hosted. */
+  private readonly opening = new Set<string>();
+  /** Another runner took this home over: its worktrees get no more checkpoints from here. */
+  private checkpointsStopped = false;
+
+  constructor(
+    private readonly registry: ProviderRegistry,
+    private readonly emit: (event: RunnerEvent) => void,
+    private readonly opts: SessionHostOptions = {},
+  ) {}
+
+  list(): RunnerSessionInfo[] {
+    return [...this.sessions.entries()].map(([sessionId, h]) => ({
+      sessionId,
+      providerId: h.providerId,
+      state: h.state,
+      resumeToken: h.session.resumeToken() ?? null,
+    }));
+  }
+
+  /** Working directories of the hosted sessions, by session id. */
+  cwds(): Map<string, string> {
+    return new Map([...this.sessions.entries()].map(([id, h]) => [id, h.cwd]));
+  }
+
+  /** Number of sessions with a running turn. */
+  get running(): number {
+    return [...this.sessions.values()].filter((h) => h.state === "running").length;
+  }
+
+  /**
+   * Open a provider session and host it. A session that is hosted, or still being opened by
+   * an earlier start, is refused with `session_exists`: a second open would run the
+   * conversation twice (one of them with an MCP token the server has retired).
+   */
+  async start(cmd: RunnerCommandOf<"session.start">): Promise<{ resumeToken: string | null }> {
+    if (this.sessions.has(cmd.sessionId) || this.opening.has(cmd.sessionId)) {
+      throw new CommandError("session_exists", `Session ${cmd.sessionId} is already running`);
+    }
+    const adapter = this.registry.get(cmd.providerId);
+    if (!adapter) {
+      const available = this.registry.list().map((a) => a.id);
+      throw new CommandError(
+        "unknown_provider",
+        `Provider ${cmd.providerId} is not available on this runner` +
+          (available.length > 0 ? ` (available: ${available.join(", ")})` : ""),
+      );
+    }
+    // A folder that isn't there (a host path sent to a sandbox, a removed worktree) is named as
+    // such instead of failing later as a provider's `spawn ENOENT`.
+    if (!existsSync(cmd.options.cwd)) throw cwdMissing(cmd.options.cwd);
+    this.opening.add(cmd.sessionId);
+    let hosted: Hosted;
+    try {
+      this.emit({ kind: "session.process", sessionId: cmd.sessionId, state: "starting" });
+      let opened: ProviderSession;
+      try {
+        opened = await adapter.openSession(agentSessionOptions(cmd.options));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // How the provider classified it (a CLI too old, not signed in): the server keeps new
+        // work off the provider instead of trying it again.
+        const kind = error instanceof ProviderSessionError ? error.kind : undefined;
+        this.emit({
+          kind: "session.process",
+          sessionId: cmd.sessionId,
+          state: "crashed",
+          error: { code: "open_failed", message, ...(kind ? { kind } : {}) },
+        });
+        throw new CommandError("open_failed", `Could not open the session: ${message}`);
+      }
+      const checkpoints = cmd.checkpoints !== false && (await isWorkTree(cmd.options.cwd));
+      hosted = {
+        providerId: cmd.providerId,
+        session: opened,
+        state: "idle",
+        rootThreadId: undefined,
+        cwd: cmd.options.cwd,
+        checkpoints,
+        checkpointChain: Promise.resolve(),
+        drainInterrupted: false,
+        turnCutOff: false,
+      };
+      this.sessions.set(cmd.sessionId, hosted);
+    } finally {
+      this.opening.delete(cmd.sessionId);
+    }
+    const { session, checkpoints } = hosted;
+    if (checkpoints) this.checkpoint(cmd.sessionId, hosted, undefined, true);
+    this.emit({ kind: "session.process", sessionId: cmd.sessionId, state: "ready" });
+    void this.pump(cmd.sessionId, hosted);
+    if (cmd.input) {
+      // The baseline must capture the tree before the first turn touches it.
+      await hosted.checkpointChain;
+      await session.send(cmd.input);
+      this.acknowledgeDelivery(cmd.sessionId, cmd.input);
+    }
+    return { resumeToken: session.resumeToken() ?? null };
+  }
+
+  async send(cmd: RunnerCommandOf<"session.send">): Promise<void> {
+    const hosted = this.get(cmd.sessionId);
+    await hosted.checkpointChain;
+    // A message's turn is work, never a compaction.
+    const compactPending = hosted.compactPending;
+    hosted.compactPending = false;
+    try {
+      await hosted.session.send(cmd.input);
+      this.acknowledgeDelivery(cmd.sessionId, cmd.input);
+    } catch (error) {
+      // The server queues the message behind the running turn instead of failing the session.
+      if (error instanceof ProviderSessionError && error.code === "turn_running") {
+        hosted.compactPending = compactPending;
+        throw new CommandError("turn_running", error.message);
+      }
+      throw error;
+    }
+  }
+
+  private acknowledgeDelivery(
+    sessionId: string,
+    input: RunnerCommandOf<"session.send">["input"],
+  ): void {
+    if (input.deliveryId)
+      this.emit({ kind: "session.delivery", sessionId, messageId: input.deliveryId });
+  }
+
+  async steer(cmd: RunnerCommandOf<"session.steer">): Promise<void> {
+    const hosted = this.get(cmd.sessionId);
+    const { session } = hosted;
+    if (!session.steer) throw new CommandError("unsupported", "This provider cannot steer turns");
+    // A compaction has no conversation turn to fold a message into (Codex refuses outright).
+    if (hosted.compactPending || hosted.compactTurnId) {
+      throw new CommandError("compacting", COMPACTING);
+    }
+    try {
+      await session.steer(cmd.input);
+      this.acknowledgeDelivery(cmd.sessionId, cmd.input);
+    } catch (error) {
+      if (error instanceof ProviderSessionError && error.code === "steer_thread_lost") {
+        throw new CommandError(error.code, error.message);
+      }
+      throw error;
+    }
+  }
+
+  async interrupt(sessionId: string): Promise<void> {
+    await this.get(sessionId).session.interrupt();
+  }
+
+  /**
+   * Compact the conversation now, as a turn of its own (`capabilities.compact`). The turn it
+   * starts goes out marked `kind: "compact"`, whichever provider runs it.
+   */
+  async compact(sessionId: string): Promise<void> {
+    const hosted = this.get(sessionId);
+    if (!hosted.session.compact) {
+      throw new CommandError("unsupported", "This provider cannot compact a conversation");
+    }
+    await hosted.checkpointChain;
+    hosted.compactPending = true;
+    try {
+      await hosted.session.compact();
+    } catch (error) {
+      // As for a message: the server tells the user a turn is running. Refused before it
+      // started, so the next turn isn't the compaction.
+      if (error instanceof ProviderSessionError && error.code === "turn_running") {
+        hosted.compactPending = false;
+        throw new CommandError("turn_running", error.message);
+      }
+      // After any other failure the provider may have started (and ended) its turn already:
+      // once the pump has seen what it emitted, that turn has taken the mark. No compaction is
+      // coming, so a turn the provider starts on its own later is work, and can be steered.
+      await pumped();
+      hosted.compactPending = false;
+      throw error;
+    }
+  }
+
+  /**
+   * Model/effort for the next turn, the autonomy level and plan mode, when the provider can
+   * change them live. Checks every requested setting before applying any.
+   */
+  async configure(cmd: RunnerCommandOf<"session.configure">): Promise<void> {
+    const { session } = this.get(cmd.sessionId);
+    const change: { model?: string | null; effort?: typeof cmd.effort } = {};
+    if (cmd.model !== undefined) change.model = cmd.model;
+    if (cmd.effort !== undefined) change.effort = cmd.effort;
+    const modelOrEffort = Object.keys(change).length > 0;
+    if (modelOrEffort && !session.configure) {
+      throw new CommandError("unsupported", "This provider cannot change model or effort live");
+    }
+    if (cmd.autonomy !== undefined && !session.setAutonomy) {
+      throw new CommandError("unsupported", "This provider cannot change autonomy live");
+    }
+    if (cmd.planMode !== undefined && !session.setPlanMode) {
+      throw new CommandError("unsupported", "This provider has no plan mode");
+    }
+    if (modelOrEffort) await session.configure?.(change);
+    if (cmd.autonomy !== undefined) await session.setAutonomy?.(cmd.autonomy);
+    if (cmd.planMode !== undefined) await session.setPlanMode?.(cmd.planMode);
+  }
+
+  async respond(cmd: RunnerCommandOf<"session.respond">): Promise<void> {
+    try {
+      await this.get(cmd.sessionId).session.respond(cmd.requestId, cmd.response);
+    } catch (error) {
+      // An answer the asker can't take (a form's "five" for a number): the request stays open
+      // and the message says what fits.
+      if (error instanceof ProviderSessionError && error.code === "invalid_answer") {
+        throw new CommandError("invalid_answer", error.message);
+      }
+      throw error;
+    }
+  }
+
+  async stop(sessionId: string, reason: "stopped" | "runner_exit" = "stopped"): Promise<void> {
+    const hosted = this.get(sessionId);
+    if (hosted.state === "running" && reason === "runner_exit") hosted.turnCutOff = true;
+    hosted.closeReason ??= reason;
+    hosted.state = "closing";
+    await hosted.session.close();
+    await hosted.checkpointChain;
+  }
+
+  /**
+   * Write no more checkpoints, including any still queued (#615): another runner took this home
+   * over and may run the same sessions in the same worktrees, so their checkpoint refs are its.
+   */
+  stopCheckpoints(): void {
+    this.checkpointsStopped = true;
+  }
+
+  async closeAll(): Promise<void> {
+    await Promise.all(
+      [...this.sessions.keys()].map((id) => this.stop(id, "runner_exit").catch(() => undefined)),
+    );
+  }
+
+  /**
+   * Let running turns finish (up to `timeoutMs`), interrupt whatever is still running,
+   * and wait for pending checkpoints. Sessions stay open (resumable) until `closeAll`.
+   */
+  async drain(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.running > 0 && Date.now() < deadline) await sleep(100);
+    const stuck = [...this.sessions.values()].filter((h) => h.state === "running");
+    for (const h of stuck) h.drainInterrupted = true;
+    await Promise.all(stuck.map((h) => h.session.interrupt().catch(() => undefined)));
+    const settle = Date.now() + 5_000;
+    while (this.running > 0 && Date.now() < settle) await sleep(50);
+    await Promise.all([...this.sessions.values()].map((h) => h.checkpointChain));
+  }
+
+  /**
+   * Wait until every pending checkpoint of a session has been written, including any queued
+   * while waiting (tests, drain, `checkpoint.list` with `settled`). A session this runner
+   * doesn't host has none pending.
+   */
+  async settled(sessionId: string): Promise<void> {
+    for (;;) {
+      const chain = this.sessions.get(sessionId)?.checkpointChain;
+      if (!chain) return;
+      await chain;
+      if (this.sessions.get(sessionId)?.checkpointChain === chain) return;
+    }
+  }
+
+  private get(sessionId: string): Hosted {
+    const hosted = this.sessions.get(sessionId);
+    if (!hosted) throw new CommandError("unknown_session", `Session ${sessionId} is not running`);
+    return hosted;
+  }
+
+  /**
+   * Queue a checkpoint. The baseline (index 0) is only written when the session has none
+   * yet, so a resumed session continues its numbering.
+   */
+  private checkpoint(sessionId: string, hosted: Hosted, turnId?: string, baseline = false): void {
+    hosted.checkpointChain = hosted.checkpointChain.then(async () => {
+      if (this.checkpointsStopped) return;
+      try {
+        const index = await nextCheckpointIndex(hosted.cwd, sessionId);
+        if (baseline && index > 0) return;
+        const cp = await createCheckpoint(hosted.cwd, sessionId, index, turnId);
+        this.emit({
+          kind: "checkpoint.created",
+          sessionId,
+          index: cp.index,
+          ref: cp.ref,
+          commit: cp.commit,
+          ...(turnId ? { turnId } : {}),
+        });
+      } catch (error) {
+        this.opts.log?.(`checkpoint failed for ${sessionId}: ${(error as Error).message}`);
+      }
+    });
+  }
+
+  private async pump(sessionId: string, hosted: Hosted): Promise<void> {
+    try {
+      for await (const raw of hosted.session.events) {
+        const event = this.rewrite(hosted, raw);
+        // Track first: a turn's end queues its checkpoint before the server hears the turn
+        // ended, so anything it asks after that (`settled`) waits for that checkpoint.
+        this.track(sessionId, hosted, event);
+        this.emit({ kind: "agent", sessionId, event });
+      }
+      await hosted.checkpointChain;
+      this.emit({
+        kind: "session.process",
+        sessionId,
+        state: "exited",
+        exitCode: 0,
+        reason: hosted.closeReason ?? "ended",
+        ...(hosted.closeReason === "runner_exit"
+          ? { interruptedTurn: hosted.turnCutOff || hosted.drainInterrupted }
+          : {}),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit({
+        kind: "session.process",
+        sessionId,
+        state: "crashed",
+        error: { code: "provider_crashed", message },
+      });
+    } finally {
+      this.sessions.delete(sessionId);
+    }
+  }
+
+  /**
+   * A drain-interrupted root turn is reported as cut off by a runner restart, and the root turn
+   * a compaction starts is marked as one.
+   */
+  private rewrite(hosted: Hosted, event: AgentEvent): AgentEvent {
+    if (
+      hosted.compactPending &&
+      event.type === "turn.started" &&
+      event.threadId === hosted.rootThreadId
+    ) {
+      hosted.compactPending = false;
+      hosted.compactTurnId = event.turnId;
+      return { ...event, kind: "compact" };
+    }
+    if (
+      hosted.drainInterrupted &&
+      event.type === "turn.interrupted" &&
+      event.threadId === hosted.rootThreadId
+    ) {
+      return { ...event, reason: "runner_restart" };
+    }
+    return event;
+  }
+
+  private track(sessionId: string, hosted: Hosted, event: AgentEvent): void {
+    if (event.type === "thread.started" && !event.thread.parentThreadId) {
+      hosted.rootThreadId = event.thread.id;
+    }
+    const onRoot = "threadId" in event && event.threadId === hosted.rootThreadId;
+    if (!onRoot) return;
+    if (event.type === "turn.started" && hosted.state !== "closing") hosted.state = "running";
+    if (
+      event.type === "turn.completed" ||
+      event.type === "turn.failed" ||
+      event.type === "turn.interrupted"
+    ) {
+      if (hosted.state !== "closing") hosted.state = "idle";
+      if (hosted.compactTurnId === event.turnId) hosted.compactTurnId = undefined;
+      if (hosted.checkpoints) this.checkpoint(sessionId, hosted, event.turnId);
+    }
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Resolves once the pending microtasks have run, so a session's pump has handled every event
+ * its provider had already emitted (the pump's loop never waits on anything else).
+ */
+function pumped(): Promise<void> {
+  return new Promise((r) => setImmediate(r));
+}

@@ -1,0 +1,312 @@
+import {
+  ArchivedSessionsPage,
+  ClaudeSdkStatus,
+  CompactSessionResponse,
+  CreateProjectResponse,
+  DiffResult,
+  DisconnectGithubResponse,
+  DismissInboxResponse,
+  ExecutionBackendsResponse,
+  ForkSessionResponse,
+  FsListResponse,
+  GitCommitResponse,
+  GitPushResponse,
+  GitStatusResponse,
+  HandoffSessionResponse,
+  HideProviderHistoryResponse,
+  InboxItem,
+  LoginCommandResponse,
+  Project,
+  ProjectChecksResponse,
+  ProjectModelsResponse,
+  ProviderHistoryResponse,
+  RefreshModelsResponse,
+  RefreshProjectResponse,
+  RemoteImageGrant,
+  ReorderProjectsResponse,
+  RestoreFilesResponse,
+  RestoreInboxResponse,
+  RetryInboxResponse,
+  ReviewSessionResponse,
+  remoteImagePath,
+  type SendMessageRequestInit,
+  Session,
+  SessionDetail,
+  SessionFileContent,
+  SessionFileList,
+  SessionSnapshot,
+  SessionTranscriptExport,
+  Settings,
+  SetupStatus,
+  SlashCommandList,
+  Snapshot,
+  SpeechSummaryResponse,
+  StartSessionResponse,
+  ToolOutputResponse,
+  TranscriptSearchResponse,
+  UpdateStatus,
+} from "@agent-rishi/contracts";
+import { httpAutomationsApi } from "./automations-api";
+import type { AgentRishiClient, SendMode } from "./client";
+import { httpFactoryApi } from "./factory-api";
+import { createFetcher } from "./http";
+import {
+  httpAgentConfigApi,
+  httpBrowserApi,
+  httpImagesApi,
+  httpSecretsApi,
+  httpVoiceApi,
+} from "./http-features";
+import { httpGithubApi, httpOrchestrationApi, httpSessionConflictApi } from "./http-orchestration";
+import { httpAuthApi, httpNetworkApi } from "./network-api";
+import { httpQueueApi } from "./queue-api";
+import { RealtimeSocket } from "./realtime-socket";
+import { openTerminalSocket } from "./terminal-channel";
+import type { MentionCandidate } from "./types";
+import { httpUpdatesApi } from "./updates-api";
+
+const whenBusy: Record<SendMode, SendMessageRequestInit["whenBusy"]> = {
+  send: "queue",
+  queue: "queue",
+  steer: "steer",
+};
+
+export interface HttpClientOptions {
+  /**
+   * Called when the server answers 401 (missing or expired cookie), with the server's code:
+   * `sign_in_required` for a remote device that has to sign in with the password.
+   */
+  onUnauthorized?: (code: string) => void;
+}
+
+/**
+ * Real client: fetch + WebSocket against the Agent Rishi server's `/api`, `/ws` and `/ws/pty`.
+ * Request and response shapes come from `@agent-rishi/contracts`; responses are validated.
+ */
+export function createHttpClient(origin: string, opts: HttpClientOptions = {}): AgentRishiClient {
+  const http = createFetcher(origin, opts.onUnauthorized ?? (() => {}));
+  const { get, post, call } = http;
+  const wsBase = origin.replace(/^http/, "ws");
+  const socket = new RealtimeSocket(`${wsBase}/ws`);
+  const enc = encodeURIComponent;
+  // File lists for `@` mentions, by URL, reused for 30 seconds while the user types.
+  const fileCache = new Map<string, { at: number; list: SessionFileList }>();
+  const mentionsFrom = async (path: string, query: string) => {
+    const cached = fileCache.get(path);
+    const list =
+      cached && Date.now() - cached.at < 30_000
+        ? cached.list
+        : await get(path, (v) => SessionFileList.parse(v));
+    fileCache.set(path, { at: cached?.list === list ? cached.at : Date.now(), list });
+    return rankMentions(list, query);
+  };
+
+  return {
+    kind: "http",
+    getSnapshot: () => get("/snapshot", (v) => Snapshot.parse(v)),
+    getSessionSnapshot: (id, query = {}) => {
+      const params = new URLSearchParams();
+      if (query.turns !== undefined) params.set("turns", String(query.turns));
+      if (query.before) params.set("before", query.before);
+      if (query.item) params.set("item", query.item);
+      const qs = params.size ? `?${params}` : "";
+      return get(`/sessions/${enc(id)}/snapshot${qs}`, (v) => SessionSnapshot.parse(v));
+    },
+    subscribe: (fromSeq, onMessage) => socket.subscribe(fromSeq, onMessage),
+    watchSession: (id, fromSeq, onMessage) => socket.watch(id, fromSeq, onMessage),
+    onConnectionChange: (listener) => socket.onState(listener),
+
+    getSessionDetail: (id) => get(`/sessions/${enc(id)}`, (v) => SessionDetail.parse(v)),
+    getSessions: (ids) =>
+      get(`/sessions?${new URLSearchParams({ ids: ids.join(",") })}`, (v) =>
+        Session.array().parse(v),
+      ),
+    listArchivedSessions: (projectId, { cursor, limit } = {}) => {
+      const params = new URLSearchParams();
+      if (cursor) params.set("cursor", cursor);
+      if (limit) params.set("limit", String(limit));
+      const qs = params.size ? `?${params}` : "";
+      return get(`/projects/${enc(projectId)}/sessions/archived${qs}`, (v) =>
+        ArchivedSessionsPage.parse(v),
+      );
+    },
+    getToolOutput: (id, itemId) =>
+      get(`/sessions/${enc(id)}/items/${enc(itemId)}/output`, (v) => ToolOutputResponse.parse(v)),
+    async sendMessage(id, input, mode) {
+      const body: SendMessageRequestInit = { input, whenBusy: whenBusy[mode] };
+      await post(`/sessions/${enc(id)}/messages`, body);
+    },
+    async interrupt(id) {
+      await post(`/sessions/${enc(id)}/interrupt`);
+    },
+    compactSession: (id) =>
+      post(`/sessions/${enc(id)}/compact`, {}, (v) => CompactSessionResponse.parse(v)),
+    async respond(id, requestId, response) {
+      await post(`/sessions/${enc(id)}/respond`, { requestId, response });
+    },
+    // A 409 conflict is persisted by the server (`conflictId`) and listed by `listConflicts`.
+    startSession: (input) => fetchStart(origin, input),
+    async stopSession(id) {
+      await post(`/sessions/${enc(id)}/stop`);
+    },
+    forkSession: (id, req) =>
+      post(`/sessions/${enc(id)}/fork`, req ?? {}, (v) => ForkSessionResponse.parse(v)),
+    handoffSession: (id, req) =>
+      post(`/sessions/${enc(id)}/handoff`, req, (v) => HandoffSessionResponse.parse(v)),
+    reviewSession: (id, req) =>
+      post(`/sessions/${enc(id)}/review`, req, (v) => ReviewSessionResponse.parse(v)),
+    exportSession: (id) =>
+      get(`/sessions/${enc(id)}/export`, (v) => SessionTranscriptExport.parse(v)),
+    queue: httpQueueApi(http),
+    searchTranscripts: ({ q, projectId, role, includeArchived, cursor, limit }) => {
+      const params = new URLSearchParams({ q });
+      if (projectId) params.set("projectId", projectId);
+      if (role) params.set("role", role);
+      if (includeArchived === false) params.set("includeArchived", "false");
+      if (cursor) params.set("cursor", cursor);
+      if (limit) params.set("limit", String(limit));
+      return get(`/search/transcripts?${params}`, (v) => TranscriptSearchResponse.parse(v));
+    },
+
+    ...httpSessionConflictApi(http),
+    resolveInbox: (id, resolution) =>
+      post(`/inbox/${enc(id)}/resolve`, resolution, (v) => InboxItem.parse(v)),
+    retryInbox: (id) =>
+      post(`/inbox/${enc(id)}/retry`, undefined, (v) => RetryInboxResponse.parse(v).item),
+    dismissInbox: (ids) => post("/inbox/dismiss", { ids }, (v) => DismissInboxResponse.parse(v)),
+    restoreInbox: (ids) => post("/inbox/restore", { ids }, (v) => RestoreInboxResponse.parse(v)),
+
+    createProject: (input) => post("/projects", input, (v) => CreateProjectResponse.parse(v)),
+    updateProject: (id, patch) =>
+      call("PATCH", `/projects/${enc(id)}`, patch, (v) => Project.parse(v)),
+    executionBackends: ({ projectId, refresh } = {}) => {
+      const params = new URLSearchParams();
+      if (projectId) params.set("projectId", projectId);
+      if (refresh) params.set("refresh", "true");
+      return get(`/execution/backends?${params}`, (v) => ExecutionBackendsResponse.parse(v));
+    },
+    reorderProjects: (projectIds) =>
+      call("PUT", "/projects/order", { projectIds }, (v) => ReorderProjectsResponse.parse(v)).then(
+        (r) => r.projects,
+      ),
+    refreshProject: (id) =>
+      post(`/projects/${enc(id)}/refresh`, {}, (v) => RefreshProjectResponse.parse(v)),
+    disconnectGithub: (id) =>
+      post(`/projects/${enc(id)}/disconnect-github`, {}, (v) => DisconnectGithubResponse.parse(v)),
+    async archiveProject(id) {
+      await call("DELETE", `/projects/${enc(id)}`);
+    },
+    automations: httpAutomationsApi(http),
+    factory: httpFactoryApi(http),
+
+    updateSettings: (patch) => call("PATCH", "/settings", patch, (v) => Settings.parse(v)),
+    secrets: httpSecretsApi(http),
+    network: httpNetworkApi(http),
+    auth: httpAuthApi(origin),
+
+    getSetupStatus: (o) =>
+      get(`/setup/status${o?.refresh ? "?refresh=1" : ""}`, (v) => SetupStatus.parse(v)),
+    loginCommand: (tool) => post(`/setup/login/${tool}`, {}, (v) => LoginCommandResponse.parse(v)),
+    refreshModels: (providerId) =>
+      post(`/providers/${encodeURIComponent(providerId)}/refresh-models`, {}, (v) =>
+        RefreshModelsResponse.parse(v),
+      ),
+    projectModels: (providerId, projectId, o) =>
+      get(
+        `/providers/${encodeURIComponent(providerId)}/models?${new URLSearchParams({
+          projectId,
+          ...(o?.refresh ? { refresh: "1" } : {}),
+        })}`,
+        (v) => ProjectModelsResponse.parse(v),
+      ),
+    getProviderHistory: (providerId) =>
+      get(`/providers/${encodeURIComponent(providerId)}/history`, (v) =>
+        ProviderHistoryResponse.parse(v),
+      ),
+    hideProviderHistory: (providerId) =>
+      post(`/providers/${encodeURIComponent(providerId)}/history/hide`, { confirm: true }, (v) =>
+        HideProviderHistoryResponse.parse(v),
+      ),
+    getClaudeSdkStatus: () => get("/setup/claude-sdk", (v) => ClaudeSdkStatus.parse(v)),
+    installClaudeSdk: () => post("/setup/claude-sdk/install", {}, (v) => ClaudeSdkStatus.parse(v)),
+    getUpdates: (o) =>
+      get(`/updates${o?.refresh ? "?refresh=1" : ""}`, (v) => UpdateStatus.parse(v)),
+    updates: httpUpdatesApi(http, origin),
+    async completeSetup() {
+      await post("/setup/complete");
+    },
+    listDirectory(path, o) {
+      const params = new URLSearchParams();
+      if (path) params.set("path", path);
+      if (o?.showHidden) params.set("showHidden", "1");
+      const qs = params.size ? `?${params}` : "";
+      return get(`/fs/list${qs}`, (v) => FsListResponse.parse(v));
+    },
+
+    getDiff: (id, scope) => post(`/sessions/${enc(id)}/diff`, scope, (v) => DiffResult.parse(v)),
+    restoreFiles: (id, req) =>
+      post(`/sessions/${enc(id)}/restore`, req, (v) => RestoreFilesResponse.parse(v)),
+    gitStatus: (id) => get(`/sessions/${enc(id)}/git/status`, (v) => GitStatusResponse.parse(v)),
+    gitCommit: (id, req) =>
+      post(`/sessions/${enc(id)}/git/commit`, req, (v) => GitCommitResponse.parse(v)),
+    gitPush: (id, req) =>
+      post(`/sessions/${enc(id)}/git/push`, req, (v) => GitPushResponse.parse(v)),
+    listFiles: (id) => get(`/sessions/${enc(id)}/files`, (v) => SessionFileList.parse(v)),
+    readFile: (id, path) =>
+      get(`/sessions/${enc(id)}/files/content?path=${enc(path)}`, (v) =>
+        SessionFileContent.parse(v),
+      ),
+    searchMentions: (id, query) => mentionsFrom(`/sessions/${enc(id)}/files`, query),
+    listSlashCommands: (id) =>
+      get(`/sessions/${enc(id)}/commands`, (v) => SlashCommandList.parse(v)),
+    searchProjectMentions: (id, query) => mentionsFrom(`/projects/${enc(id)}/files`, query),
+    listProjectSlashCommands: (id, provider) =>
+      get(`/projects/${enc(id)}/commands?provider=${enc(provider)}`, (v) =>
+        SlashCommandList.parse(v),
+      ),
+    listProjectChecks: (id) =>
+      get(`/projects/${enc(id)}/checks`, (v) => ProjectChecksResponse.parse(v).checks),
+    openTerminal: (o) => openTerminalSocket(wsBase, o),
+    artifactUrl: (id) => `${origin}/api/artifacts/${enc(id)}`,
+    remoteImageUrl: async (url) => {
+      const grant = await post("/remote-image", { url }, (v) => RemoteImageGrant.parse(v));
+      return `${origin}${remoteImagePath(grant.id)}`;
+    },
+    speechSummary: (text) =>
+      post("/utility/speech-summary", { text }, (v) => SpeechSummaryResponse.parse(v)),
+
+    browser: httpBrowserApi(http, wsBase),
+    agentConfig: httpAgentConfigApi(http),
+    images: httpImagesApi(http),
+    voice: httpVoiceApi(http),
+    orchestration: httpOrchestrationApi(http),
+    github: httpGithubApi(http),
+  };
+}
+
+/** `@` mention candidates: paths containing the query, shortest first. */
+export function rankMentions(list: SessionFileList, query: string): MentionCandidate[] {
+  const q = query.toLowerCase();
+  return list.entries
+    .filter((e) => e.path.toLowerCase().includes(q))
+    .sort((a, b) => a.path.length - b.path.length)
+    .slice(0, 8)
+    .map((e) => ({ path: e.path, kind: e.kind }));
+}
+
+/** `POST /api/sessions` answers 409 for a conflict; that body is a result, not an error. */
+async function fetchStart(origin: string, input: unknown): Promise<StartSessionResponse> {
+  const res = await fetch(`${origin}/api/sessions`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(input),
+  });
+  const json: unknown = await res.json().catch(() => null);
+  const parsed = StartSessionResponse.safeParse(json);
+  if (parsed.success) return parsed.data;
+  const message =
+    (json as { error?: { message?: string } } | null)?.error?.message ??
+    `Couldn't start the session (${res.status})`;
+  throw new Error(message);
+}

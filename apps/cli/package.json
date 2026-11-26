@@ -1,0 +1,65 @@
+{
+  "name": "agent-rishi",
+  "version": "0.7.10",
+  "description": "A local-first harness for coding agents: Claude Code, Codex and OpenCode sessions, an orchestrator and project managers, an inbox, GitHub traceability, automations and an experimental dark factory.",
+  "license": "MIT",
+  "author": "sventkrtl",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sventkrtl/agent-rishi.git",
+    "directory": "apps/cli"
+  },
+  "homepage": "https://github.com/sventkrtl/agent-rishi",
+  "bugs": {
+    "url": "https://github.com/sventkrtl/agent-rishi/issues"
+  },
+  "type": "module",
+  "bin": {
+    "agent-rishi": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "keywords": [
+    "coding-agents",
+    "ai-agents",
+    "agent-harness",
+    "harness",
+    "claude-code",
+    "claude",
+    "codex",
+    "openai-codex",
+    "opencode",
+    "orchestration",
+    "automation",
+    "software-factory",
+    "github",
+    "git-worktree",
+    "mcp",
+    "developer-tools",
+    "local-first"
+  ],
+  "scripts": {
+    "build": "tsdown && node scripts/copy-assets.mjs",
+    "prepack": "node scripts/copy-readme.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@napi-rs/keyring": "^2.1.2",
+    "node-pty": "1.1.0",
+    "playwright-core": "1.64.1"
+  },
+  "devDependencies": {
+    "@agent-rishi/contracts": "workspace:*",
+    "@agent-rishi/providers": "workspace:*",
+    "@agent-rishi/runner": "workspace:*",
+    "@agent-rishi/server": "workspace:*",
+    "@agent-rishi/web": "workspace:*",
+    "tsdown": "^0.23.7"
+  }
+}

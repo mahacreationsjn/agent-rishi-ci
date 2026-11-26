@@ -1,0 +1,1 @@
+ALTER TABLE `sessions` ADD `mcp_servers` text;

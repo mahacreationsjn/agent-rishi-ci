@@ -1,0 +1,228 @@
+import { z } from "zod";
+import { TurnKind } from "../agent-events";
+import { SessionChecks } from "../checks";
+import {
+  AutonomyLevel,
+  ErrorInfo,
+  GitHubIssueRef,
+  GitHubPrRef,
+  Id,
+  ProviderId,
+  ReasoningEffort,
+  Role,
+  Timestamp,
+} from "../common";
+import { Item } from "../items";
+import { McpServerState } from "../mcp-status";
+import { StartedBy, workFields } from "../work";
+import { SessionResult } from "../workbench";
+
+/**
+ * Session lifecycle.
+ * - `created`: row exists, nothing started on a runner yet.
+ * - `queued`: waiting behind conflicting work (§8.4 `wait`).
+ * - `starting`: workspace prepared / provider process launching.
+ * - `running`: a turn is in progress.
+ * - `waiting`: blocked on the user (approval or question).
+ * - `idle`: between turns, ready for input.
+ * - `interrupted`: cut off (runner restart, crash); resumable.
+ * - `completed` / `failed` / `stopped`: terminal.
+ */
+export const SessionStatus = z.enum([
+  "created",
+  "queued",
+  "starting",
+  "running",
+  "waiting",
+  "idle",
+  "interrupted",
+  "completed",
+  "failed",
+  "stopped",
+]);
+export type SessionStatus = z.infer<typeof SessionStatus>;
+
+/**
+ * The statuses of a session that is working or about to: not started yet (`created`, `queued`,
+ * `starting`), in a turn (`running`) or blocked on the user (`waiting`). It is the one list the
+ * server and the UI share: such a session counts as running or queued work for conflict
+ * detection (§8.4), its worktree is never cleaned up (§9), and its project can't be archived
+ * until it is stopped (§13).
+ */
+export const ACTIVE_SESSION_STATUSES: readonly SessionStatus[] = [
+  "created",
+  "queued",
+  "starting",
+  "running",
+  "waiting",
+];
+
+/** Whether a session is working or about to (`ACTIVE_SESSION_STATUSES`). */
+export const isActiveSession = (session: { status: SessionStatus }): boolean =>
+  ACTIVE_SESSION_STATUSES.includes(session.status);
+
+/**
+ * How a session was made from another one: `fork` continues the source's conversation through
+ * the provider's native fork; `handoff` starts a new conversation, possibly on another
+ * provider, from a brief of the source's work; `review` is a read-only session, often on
+ * another provider, that reviews the source's changes from a review brief (§9). All start from
+ * the source's code.
+ */
+export const ForkKind = z.enum(["fork", "handoff", "review"]);
+export type ForkKind = z.infer<typeof ForkKind>;
+
+/**
+ * Where a forked, handed-off or reviewing session came from: the source session and the
+ * checkpoint its worktree started from (null when the source had none yet). The source is left
+ * as it was.
+ */
+export const ForkOrigin = z.object({
+  sessionId: Id,
+  checkpoint: z.int().nonnegative().nullable(),
+  /**
+   * A fork, a handoff or a review; absent on forks recorded before handoffs existed, so means
+   * `fork`.
+   */
+  kind: ForkKind.optional(),
+  /**
+   * The source's turn the fork was taken at ("Fork from here"): its conversation ends with
+   * that turn and its code is that turn's checkpoint. Absent or null: the source's latest
+   * moment.
+   */
+  turnId: Id.nullable().optional(),
+  /**
+   * That turn's number among the source's own turns (1 is its first), counted when it was
+   * forked. Checkpoint numbers can differ from it (a checkpoint that failed to write takes no
+   * number), so this is what to show as "turn N". Absent when unknown.
+   */
+  turnNumber: z.int().positive().nullable().optional(),
+  /**
+   * Who started the work the session continues, when it wasn't the user: the source's
+   * `startedBy`, or the one the source recorded here when it was itself forked or handed off.
+   * The new session is the user's, but the work and any issue text in it are still the
+   * factory's, an automation's or a PM's, so PR feedback goes by this and trusts it no more than
+   * the source. Absent: the user's (and on sessions recorded before it existed).
+   */
+  startedBy: StartedBy.optional(),
+});
+export type ForkOrigin = z.infer<typeof ForkOrigin>;
+
+/** An agent session of any role (§8.1). */
+export const Session = z.object({
+  id: Id,
+  /** Null for the orchestrator. */
+  projectId: Id.nullable(),
+  role: Role,
+  /** The session that started this one (PM for agents, orchestrator for PMs). */
+  parentSessionId: Id.nullable(),
+  /** Who/why/what (§8.4): startedBy, purpose, workKey, scope, progress. */
+  ...workFields,
+  title: z.string().nullable(),
+  provider: ProviderId,
+  model: z.string().nullable(),
+  effort: ReasoningEffort.nullable(),
+  autonomy: AutonomyLevel,
+  /**
+   * True while the session is planning (where the provider reports `capabilities.planMode`):
+   * the agent explores and proposes a plan, and implements only once the plan is approved.
+   * Absent means false.
+   */
+  planMode: z.boolean().optional(),
+  /**
+   * The project's checks, frozen when the session was created, and whether it keeps going
+   * until they pass (§9 Project checks). Absent or null: the project had no checks then (or the
+   * session predates them), so there is nothing to run.
+   */
+  checks: SessionChecks.nullable().optional(),
+  status: SessionStatus,
+  /** Directory the agent runs in. */
+  cwd: z.string(),
+  /** Set when the session owns a worktree under `~/.agent-rishi/wt/`. */
+  worktreePath: z.string().nullable(),
+  branch: z.string().nullable(),
+  baseBranch: z.string().nullable(),
+  issue: GitHubIssueRef.nullable(),
+  pr: GitHubPrRef.nullable(),
+  /** Provider resume token (session/thread id). */
+  resumeToken: z.string().nullable(),
+  /** Runner currently hosting the session. */
+  runnerId: z.string().nullable(),
+  automationRunId: Id.nullable(),
+  /** The session's root thread, once the provider started it. */
+  rootThreadId: Id.nullable(),
+  /** Structured result from the agent's `finish` tool, once reported. */
+  result: SessionResult.nullable().optional(),
+  /** When the session was archived: hidden from the sidebar, its worktree cleaned up. */
+  archivedAt: Timestamp.nullable().optional(),
+  /**
+   * When Agent Rishi removed the session's worktree (archive or inactivity cleanup). The branch and
+   * checkpoints stay; the worktree is recreated from the branch on the next message.
+   */
+  worktreeRemovedAt: Timestamp.nullable().optional(),
+  /** Set when the session was forked from another one (its conversation and code). */
+  forkedFrom: ForkOrigin.nullable().optional(),
+  /**
+   * Why the provider last refused to open the session, as the runner reported it (code
+   * `open_failed`), with its `kind` when the provider classified it: `setup` for a CLI too old to
+   * run, `auth` for one that isn't signed in. Absent or null when no open failed.
+   */
+  startError: ErrorInfo.nullable().optional(),
+  /**
+   * The session's MCP servers and their live state, as its provider last reported them
+   * (`capabilities.mcpStatus`, `session.updated.mcpServers`). Absent or null: not reported, e.g.
+   * a provider without the capability or a session that hasn't started.
+   */
+  mcpServers: z.array(McpServerState).nullable().optional(),
+  createdAt: Timestamp,
+  updatedAt: Timestamp,
+  endedAt: Timestamp.nullable(),
+});
+export type Session = z.infer<typeof Session>;
+
+/** Thread projection (§6 `threads`). */
+export const Thread = z.object({
+  id: Id,
+  sessionId: Id,
+  parentThreadId: Id.nullable(),
+  parentItemId: Id.nullable(),
+  title: z.string().nullable(),
+  agentType: z.string().nullable(),
+  createdAt: Timestamp,
+});
+export type Thread = z.infer<typeof Thread>;
+
+export const TurnStatus = z.enum(["running", "completed", "failed", "interrupted"]);
+export type TurnStatus = z.infer<typeof TurnStatus>;
+
+/** Turn projection (§6 `turns`). */
+export const Turn = z.object({
+  id: Id,
+  threadId: Id,
+  sessionId: Id,
+  status: TurnStatus,
+  startedAt: Timestamp,
+  completedAt: Timestamp.nullable(),
+  error: ErrorInfo.nullable(),
+  /**
+   * The provider's position at the end of this turn (`forkPoint` on its end event): the
+   * conversation can be forked through this turn. Absent or null when it can't, e.g. a turn
+   * recorded before Agent Rishi kept these, or a provider that doesn't report them.
+   */
+  forkPoint: z.string().nullable().optional(),
+  /** What the turn was for (`kind` on its `turn.started`). Absent or null: `work`. */
+  kind: TurnKind.nullable().optional(),
+});
+export type Turn = z.infer<typeof Turn>;
+
+/** Item projection (§6 `items`): the latest state of an item plus its location. */
+export const ItemRecord = z.object({
+  sessionId: Id,
+  threadId: Id,
+  turnId: Id,
+  /** Order within the thread. */
+  position: z.int().nonnegative(),
+  item: Item,
+  createdAt: Timestamp,
+  updatedAt: Timestamp,
+});
+export type ItemRecord = z.infer<typeof ItemRecord>;

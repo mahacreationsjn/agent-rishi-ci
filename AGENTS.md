@@ -1,0 +1,75 @@
+# Agent Rishi: agent guide
+
+Agent Rishi is a local-first harness for coding agents. **`docs/DESIGN.md` is the locked design and the source of truth.** Read the relevant sections before changing behaviour; anything in its "Locked decisions" table needs a design discussion first.
+
+## Layout
+
+```
+apps/
+  server/     Hono server: security, SQLite event log + projections (Drizzle), UI WebSocket, RunnerClient
+  runner/     Runner process: provider sessions, event journal, lock file, WebSocket protocol server
+  web/        React 19 + Vite SPA (Tailwind v4, shadcn/ui, TanStack Router + Query, Zustand)
+  cli/        The published `agent-rishi` package: CLI entry, bundles server + runner + web with tsdown
+  desktop/    The desktop app (Electron): main process, preload bridge, server host, electron-builder packaging
+packages/
+  contracts/  zod schemas for everything that crosses a boundary (events, entities, protocols, settings)
+  providers/  ProviderAdapter / ProviderSession interfaces, the Fake provider, the Claude Code, Codex and OpenCode adapters, a generic ACP client and the Cursor and Gemini CLI adapters on it
+docs/DESIGN.md
+changes/      Changelog fragments: one file per user-facing change, assembled into CHANGELOG.md at release
+scripts/release/  bump-version.mjs (the Release workflow's version bump) and changes.mjs (fragments)
+```
+
+Key entry points:
+- Contracts: `packages/contracts/src/` (agent events `agent-events.ts`, items `items.ts`, runner protocol `runner/`, UI WebSocket `ws.ts`, persisted events `events.ts`, work/conflicts `work.ts`, factory `factory.ts`).
+- Server: `apps/server/src/server.ts` (`startServer({ port, dataDir, token })`), dev entry `src/dev.ts`.
+- Runner: `apps/runner/src/runner.ts` (`startRunner`), process entry `src/main.ts`.
+- Web shell: `apps/web/src/components/shell/`.
+- CLI: `apps/cli/src/cli.ts`.
+- Desktop: `apps/desktop/src/main/main.ts` (entry), `desktop-app.ts` (wiring), `src/server/host.ts` (server child), `src/preload/preload.ts` (`window.agentRishiDesktop`); the UI side is `apps/web/src/lib/platform-desktop.ts`. User guide: `docs/desktop.md`.
+
+## Commands
+
+Node 24+ and pnpm 10 (`corepack enable`).
+
+| Command | What it does |
+|---|---|
+| `pnpm install` | Install the workspace |
+| `pnpm dev` | Server on 127.0.0.1:4318 (data in `.agent-rishi-dev/`, Fake provider on) + Vite on http://localhost:5173 |
+| `pnpm build` | Build the web app, then bundle `apps/cli/dist` |
+| `pnpm typecheck` | `tsc --noEmit` in every package |
+| `pnpm lint` / `pnpm format` | Biome check / Biome fix + format |
+| `pnpm test` | Vitest, the fast suites (what CI and the release run) |
+| `pnpm test:slow` | The real-browser and real-process suites (Chromium, terminals, detached runners). Not in CI; run them when working in those areas |
+| `pnpm e2e` | Not in CI. Build the web app and the CLI, then Playwright (`apps/web/e2e`) against a real server + runner with an isolated home and the Fake provider; the update spec also runs the built CLI against a local fake npm registry (first run: `pnpm --filter @agent-rishi/web exec playwright install chromium`) |
+| `pnpm desktop:dev` | Build the web UI and the desktop bundle, then run the desktop app from the checkout with home `.agent-rishi-dev/` and the Fake provider (attaches to `pnpm dev`'s server when it runs). Pass options after `--`, e.g. `pnpm desktop:dev -- --home <dir>` |
+| `pnpm desktop:build` | `pnpm build`, then the unpacked desktop app for this OS in `apps/desktop/release/` (`pnpm desktop:dist` builds the installers) |
+| `pnpm e2e:desktop` | `pnpm desktop:build`, then Playwright's Electron smoke test against the unpacked app with an isolated home and the Fake provider (plus a local update feed test on Windows). Separate from `pnpm e2e` because packaging is slow |
+| `VITE_AGENT_RISHI_MOCK=1 pnpm --filter @agent-rishi/web dev` | The UI against the in-memory mock client, no server needed (dev only; builds always use the real server) |
+| `pnpm db:generate` | Generate a Drizzle migration after editing a table file `apps/server/src/db/schema-*.ts` (`schema.ts` is the barrel that re-exports them). The snapshots must stay one chain (`apps/server/test/migration-chain.test.ts` checks it): if `main` gained a migration since you generated yours, delete your migration's folder after rebasing and run `pnpm db:generate` again so yours sits on top. Don't use `--ignore-conflicts`, which writes a merge snapshot with two parents. To repair a fork that already reached `main`, change only the newer snapshots (their `prevIds`, and add the other branch's entities to `ddl`), never a shipped `migration.sql`, then check that `pnpm db:generate` reports no changes and `pnpm --filter @agent-rishi/server exec drizzle-kit check` passes |
+| `node apps/cli/dist/cli.js --home <dir>` | Run the built CLI (`doctor`, `update`, `stop`, `--port`, `--no-open`). A repository build never switches versions; self-update is tested with the fake registry in `apps/cli/test/support/` |
+
+## Conventions
+
+- **Contracts first.** Any new message, event, entity or setting is added to `packages/contracts` (with JSDoc and a round-trip test) before it is used. Validate at boundaries with the shared schemas.
+- **Plain TypeScript**, strict, ESM. **No Effect**, no clever abstractions; mainstream patterns that other agents can follow.
+- **Small modules:** keep files under ~400 lines; split by concern.
+- **Honest capabilities:** UI and orchestration read `ProviderCapabilities`, never branch on a provider id.
+- **Heavy UI code loads on demand.** Pages are lazy routes, and the terminal, diff viewer and code editor come from `apps/web/src/components/on-demand.tsx`; never import those libraries statically from anything the web app's entry reaches. `apps/web/test/entry-chunk.test.ts` checks it. See `apps/web/README.md`.
+- **Events are append-only.** Projections are written in the same transaction as their event (`apps/server/src/events/`), so they can be rebuilt from the log.
+- **Security:** server and runner bind 127.0.0.1 only; every request needs the install token; never log or persist tokens in transcripts.
+- **Tests: keep them QR.** The bar is that the app installs and works; CI checks exactly that (typecheck, lint, `pnpm test`, build, the packed CLI installed and started). Add a Vitest unit test (next to the package in `test/`) when logic is easy to get wrong and costly when wrong: the risk classifier and other security checks, contracts round-trips, migrations, parsers, anything that can lose data. Don't add end-to-end, real-browser or real-process tests for a feature unless asked, and keep `pnpm test` fast and deterministic (no real timers or races; use the Fake provider, never live agent turns). Bugs users hit get an issue and a fix, with a regression test when the logic warrants one.
+- **Process-heavy suites get room for a busy machine.** `startHarness` (`apps/server/test/support/harness.ts`), and `startServer` without `runner: false`, start a real runner process with the Fake provider, plus git worktrees. `vitest.config.ts` finds those server files by reading them and runs them as the `@agent-rishi/server (runner)` project, beside the runner's worktree suites (`@agent-rishi/runner (worktrees)`, a list in the config), with 120 s test and hook timeouts (and no lower ones in the files). The harness's `waitUntil` waits 60 s, and its server gives runner commands at least 90 s (`runnerRequestTimeoutFloorMs`), so the product's own 5-30 s deadlines don't fire first. They stay in `pnpm test` and CI, in the shared pool: a worker limit of their own would need a phase of their own after the fast suites (Vitest 5), which made the run 40-50% slower. Instead, when the machine is already busy at start (under half idle), the config runs a quarter of the CPUs' worth of workers for every project. The other runner, server and release-script suites get 40 s, the web suites 15 s. Reach for the harness only when the test is about the server and the runner together (sessions, turns, worktrees, MCP over a live runner). For server logic, prefer services over a real SQLite database with a scripted `RunnerPort` (`support/factory-env.ts`, `support/github-env.ts`) or `startServer({ runner: false })`; those stay in the fast pool. Wait on the condition with `waitUntil` and a generous deadline, never a fixed sleep or a tight timer. `node scripts/test-under-load.mjs` runs three `pnpm test` at once, as parallel factory builds do, to check for timing flakes.
+- **Tests don't depend on the time of day.** The factory test env (`apps/server/test/support/factory-env.ts`) runs the process clock from a fixed instant (`TEST_START` in `support/test-clock.ts`, mid-morning local time), so a test can move it hours ahead without crossing midnight into the daily digest, counters and budget; a test about day boundaries starts near midnight on purpose (`createFactoryEnv({ startAt })`). Elsewhere, pin the clock (`vi.setSystemTime`) instead of building on the real `Date.now()` when a test moves time by hours. `AGENT_RISHI_TEST_CLOCK=23:50` starts the server suites' system clock at that local time, and `pnpm test` runs a sample of the factory, budget and digest suites at 23:50 and 00:05 (`@agent-rishi/server (clock …)`).
+- **Agent sessions don't inherit Agent Rishi's internal `AGENT_RISHI_*` variables** (its home, its installer and the like; `packages/providers/test/agent-env.test.ts` keeps it so), and the root `vitest.config.ts` drops them for every worker as well. Run the tests as they are: there's no need to look for those variables first.
+- **Never mention other harnesses or products as inspiration** anywhere: code, comments, docs, commits. Describe Agent Rishi on its own terms.
+- **Commits:** conventional commits (`feat(server): ...`, `fix(runner): ...`, `chore: ...`), one logical change per commit. `pnpm typecheck && pnpm lint && pnpm test` must pass.
+- **Changelog notes are fragments.** A user-facing change adds its note as its own file, `changes/<issue>-<slug>.md` (front matter `section: added | changed | deprecated | removed | fixed | security`, then `- ` bullets in the style of `CHANGELOG.md`). Never edit `CHANGELOG.md` for unreleased work, so pull requests never conflict on it. Docs-only and internal changes need no note. Format: `changes/README.md`; `pnpm test` checks it.
+- Generated files: `apps/server/drizzle/` (migrations, via drizzle-kit) and `apps/web/src/components/ui/` (shadcn). Add shadcn components with `pnpm dlx shadcn@latest add <name>` from `apps/web`.
+
+## Releasing
+
+Agent Rishi is not published: there is no npm package and no release feed, and self-update is off (`agent-rishi update` says to update from git). A release is a version bump on `main`, deployed from the owner's laptop.
+
+1. Run `node scripts/release/bump-version.mjs <patch|minor|major>`. It bumps `apps/cli/package.json`, `apps/desktop/package.json` and `SOURCE_VERSION` in `packages/contracts/src/version.ts` (a test keeps them in sync), assembles the fragments in `changes/` into the new version's section of `CHANGELOG.md` (grouped by section) and deletes them, staging the removal. `pnpm changelog:preview` prints that section first and changes nothing.
+2. After `pnpm typecheck && pnpm lint && pnpm test` and `pnpm build` pass, commit it as `chore(release): X.Y.Z` with a `vX.Y.Z` tag.
+3. Deploy: on the machine that runs it, `git pull`, `pnpm install`, `pnpm build`, then restart the server (`node apps/cli/dist/cli.js --home <dir> --port <port> --no-open`).

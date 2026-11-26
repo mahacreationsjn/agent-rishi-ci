@@ -1,0 +1,154 @@
+# Getting started
+
+From `agent-rishi` to your first agent session in a couple of minutes, without typing a credential if your machine is already set up.
+
+## 1. Check the requirements
+
+| Requirement | Check | Notes |
+|---|---|---|
+| Node.js 24 or newer | `node --version` | Agent Rishi refuses to start on older versions |
+| git | `git --version` | Set `user.name` and `user.email`: `git config --global user.name "Your Name"` |
+| Claude Code, Codex CLI, OpenCode 2.2+, the Cursor CLI and/or Gemini CLI 0.68+ | `claude --version`, `codex --version`, `opencode --version`, `agent --version`, `gemini --version` | At least one, **signed in** (`claude auth login`, `codex login`, `opencode auth login`, `agent login`, or `gemini` and its sign-in prompt; OpenCode's own free models work without an account) |
+| GitHub CLI *(optional)* | `gh auth status` | Needed for issues, PRs, evidence, triage and the factory |
+| Edge or Chrome *(optional)* | | For the browser panel and the agents' browser tools |
+
+Agent Rishi uses your installed CLIs and their logins, including claude.ai, ChatGPT, Cursor and Google subscriptions. It never asks for a provider password or stores a provider token.
+
+**Cursor:** Agent Rishi drives your own Cursor CLI with your own login, as it does for the other CLIs, and runs the models your Cursor plan includes. Check your plan's terms for automated or unattended use, such as the software factory, before you point it at Cursor.
+
+**Gemini CLI:** Agent Rishi drives your own Gemini CLI with the login you chose in it (Google, a Gemini API key or Vertex AI), and never changes that choice. Check your plan's terms for automated or unattended use, such as the software factory, before you point it at Gemini CLI.
+
+**Antigravity CLI:** install it with `curl -fsSL https://antigravity.google/cli/install.sh | bash` (on Windows, `irm https://antigravity.google/cli/install.ps1 | iex`) and sign in once with `agy acp --login`. Agent Rishi runs its sessions on your login with a settings file of its own (`~/.gemini/antigravity-cli/agent-rishi/settings.json`), which keeps your settings and deny rules but makes Antigravity CLI ask before every action, so Agent Rishi's permission levels decide. Check your plan's terms for automated or unattended use before you point the software factory at it.
+
+## 2. Start Agent Rishi
+
+Agent Rishi runs from its git checkout (there is no npm package):
+
+```sh
+git clone https://github.com/sventkrtl/agent-rishi.git && cd agent-rishi
+pnpm install && pnpm build
+node apps/cli/dist/cli.js
+```
+
+Agent Rishi creates its data directory (`~/.agent-rishi/`), generates a per-install token, starts the server on `http://127.0.0.1:4317` (and the runner in the background), and opens your browser on an authenticated link. The terminal shows the URL in case the browser didn't open.
+
+Want an `agent-rishi` command? Link the build once:
+
+```sh
+cd apps/cli && npm link
+agent-rishi
+```
+
+Useful flags: `--port <n>`, `--home <dir>`, `--no-open`. See the [CLI reference](reference.md#cli-reference).
+
+## 3. The setup checklist
+
+The first screen checks, in parallel:
+
+- **Claude Code:** installed version, login and login expiry.
+- **Codex:** installed version and login. A Codex login also makes Codex the default image engine.
+- **OpenCode:** installed version (2.2 or newer) and the providers it's connected to. With none, only OpenCode's free models are available, and the row suggests `opencode auth login`.
+- **Cursor:** the Cursor CLI's version, that it has the ACP server Agent Rishi drives (`agent acp`; older builds need `agent update`), and its login (`agent login`).
+- **Gemini CLI:** its version (0.68 or newer) and its login, read from Gemini CLI's own settings and your environment. A Google login kept in your system keychain, or an API key in a `.env` file, can't be confirmed from outside, so it shows as a warning rather than an error.
+- **Antigravity CLI:** its version (1.5.12 or newer) and whether it is signed in (its sign-in file exists, or `GEMINI_API_KEY` is set).
+- **GitHub CLI:** installed and signed in.
+- **git:** installed, with your identity set.
+- **Browser:** an installed Edge or Chrome.
+- **Node.js:** version 24 or newer.
+
+Anything that passes is never asked about. Anything missing gets one fix: the install command, or a **Sign in** button that runs the tool's own login (`claude auth login`, `codex login`, `opencode auth login`, `agent login`, `gemini`, `gh auth login`) in a terminal right on the page, so the provider's normal browser login handles it. **Sign in** runs the exact copy Agent Rishi found, by its full path.
+
+Agent Rishi looks for Claude Code, Codex, OpenCode, the Cursor CLI, Gemini CLI and the GitHub CLI on your PATH, then in their installers' own folders, such as `~/.local/bin`, where the native Claude Code installer puts `claude` even when that folder isn't on your PATH. A copy that doesn't run (for example an npm shim left behind after its package was removed) is skipped and shown as **installed but broken**, with its path; see [Troubleshooting](troubleshooting.md#claude-code-codex-or-opencode-is-installed-but-broken). **Re-check** also picks up PATH changes you made after starting Agent Rishi.
+
+![The first-run setup checklist](images/setup.png)
+
+You can re-open the checklist any time with **Run first-time setup again** at the bottom of the sidebar, or check from the terminal:
+
+```sh
+agent-rishi doctor
+```
+
+Agent Rishi also re-checks silently on every launch and warns when something changes, such as an expiring Claude login or a CLI version that's too old.
+
+## 4. Add a project
+
+Click **+** next to **Projects** in the sidebar and choose:
+
+- **Local folder.** Browse your disk with the built-in folder picker. Any folder works; GitHub features switch on when it has a GitHub remote, including one added later (by you or an agent, see [GitHub](github.md#when-a-folder-gets-a-github-remote-later)).
+- **Clone from GitHub.** Paste a repository URL or `owner/repo` and Agent Rishi clones it.
+
+Agent Rishi then opens the new project's **New session** view, ready for your first task (the last step of first-run setup lands there too).
+
+To take a project off the list again, open its menu in the sidebar (right-click the project, or the **⋯** button that shows on hover) and choose **Archive project**. Its automations and factory stop and the worktrees of its sessions are cleaned up; your folder isn't touched. A project can't be archived while one of its sessions is working or waiting to start (created, queued, starting, running or waiting): stop those first, or archive a session that hasn't started yet. The server refuses the archive until then. While it is archived its sessions are read-only: you can still open them and read their transcripts, but nothing sends them a message (the composer says the project is archived, and the server refuses messages from anyone, the PM, automations and the factory included). Adding the same folder again brings the project back, with its sessions.
+
+New projects get the **starter set** of automations added, all switched **off**. Turn on the ones you want later (see [Automations](automations.md)).
+
+### Optional: `.agent-rishi/project.json`
+
+Commit this file to tell Agent Rishi how to prepare a fresh worktree:
+
+```json
+{
+  "setup": ["pnpm install"],
+  "devServer": { "command": "pnpm dev", "port": 5173 },
+  "defaultProvider": "codex",
+  "checks": ["pnpm typecheck", { "command": "pnpm test", "timeoutSec": 900 }]
+}
+```
+
+- `setup` runs, in order, in every new worktree; the output streams into the session. Setup stops at the first command that fails, and the session starts anyway: the agent's first message then begins with the failed command, its exit code and the end of its output, so it can fix the problem instead of tripping over it. A new worktree starts from the freshly fetched default branch, so its `setup` can differ from your own checkout's, for example after a merged pull request you haven't pulled. Setup like that doesn't run until you allow it: the first worktree that finds it asks once in the inbox (**Setup commands changed in #N: run them?**). **Run them** allows that list for new worktrees from then on, and **Don't run** keeps skipping it without asking again.
+- `devServer` (a command string or `{ command, port, cwd }`) records how to start your app, so agents (and the UI review automation) know what to run and where to point the browser. Running dev servers are also discovered automatically.
+- `defaultProvider` (`claude`, `codex` or `opencode`) is the provider new sessions in this project use unless you pick one (a default agent chosen on the project's **Settings** tab wins).
+- `checks` are your project's checks: commands such as `pnpm typecheck` or `pnpm test` that pass when they exit 0, as a string or `{ command, timeoutSec }` (10 minutes by default, at most an hour). With checks, the New session view and a session's composer offer **Checks**: **Keep going until checks pass**, with a round cap (3 by default). With it on, Agent Rishi runs the checks in the session's worktree after each turn, one after another, with `CI=true` like the agent's own shell. Each run shows in the transcript as a card with each check's result, duration and output. When some fail, the agent gets a message with each failing command, its exit code and the end of its output, and another turn fixes them. When they pass, or the round cap is reached, the session waits for you. **Stop**, or a message of your own, ends the loop. A session's checks are fixed when it starts: they come from the project's own folder, not from the session's worktree, so an agent that edits this file can't change what runs (Session details lists the commands). An agent's edit to `.agent-rishi/project.json` asks first at the Auto level.
+
+## 5. Start your first session
+
+A project you just added opens here already. Later, open the project and click **New session** (or **Start a session** while it has none, or the **+** next to the project in the sidebar). A new session opens with the message box you use in every session: describe the task ("Add a README section describing this project and a tiny test for src/math.js"), attach or paste screenshots and files if they help, pick the provider, model, effort, permissions or **Plan** under the message box if you want something other than the defaults, and send. Nothing is created until you send: the first message starts the session, and the view becomes that session. A draft you leave is kept in the browser for when you come back.
+
+What happens next:
+
+1. Agent Rishi creates a worktree under `~/.agent-rishi/wt/` on a new `agent-rishi/...` branch and runs your setup commands. Your own checkout is never touched. In a GitHub project it fetches first, so the branch starts from the latest default branch on GitHub even if your local copy is behind (a local default branch with commits of your own is used as it is).
+2. The agent works. Tool calls are grouped into collapsible blocks with live output; plans, todos and subagents get their own cards.
+3. **Risky actions ask.** With the default autonomy level the agent edits files and runs normal commands freely, but writes outside the worktree, force pushes, global installs and the like arrive as approval cards (in the chat and in the inbox).
+4. When the turn ends you'll see the summary, the cost, and **follow-up chips** with suggested next prompts.
+5. Open the right panel (**Ctrl/Cmd+\\**) to review the **Diff**, browse **Files**, use the **Terminal** or watch the **Browser**. Commit and push from the git bar. In a GitHub project, **Open PR** in the git bar (or in the **Issue / PR** tab) asks the agent to open a pull request: it commits what's left, pushes and writes the description, and the PR then shows in the Issue / PR tab.
+
+![A finished turn: summary, follow-up chips and the diff](images/session.png)
+
+## 6. Talk to the orchestrator and your PM
+
+- **Orchestrator** (top of the sidebar): ask "What's going on across my projects?", "Create a project for ~/code/api", or "Ask the storefront PM to fix issue 12".
+- **Project manager** (under each project): it can triage issues, start sessions for you, follow them and report back.
+
+See [Orchestration](orchestration.md).
+
+## 7. Tune the defaults
+
+Open **Settings** (**Ctrl/Cmd+,**):
+
+| Section | What's there |
+|---|---|
+| General | Theme, follow-up chips, the automations master switch, the global factory kill switch, updates, worktree cleanup |
+| Providers | Default provider, model and effort for the orchestrator, PMs and agents; hiding Agent Rishi's older sessions from the Codex app ([details](troubleshooting.md#agent-rishis-sessions-show-up-in-the-codex-app)) |
+| Autonomy | The default autonomy level for new sessions |
+| GitHub | Connection status |
+| Voice | Dictation engine, push-to-talk, read-aloud |
+| Image generation | Engine, default size and quality, daily cap, API keys, a test button |
+| Utility model | The small model for follow-ups, read-aloud summaries and session titles |
+| Notifications | Toasts, which inbox categories notify you (needs you, failures, factory activity, automations), the chime when an agent needs you (with a test button), browser notifications |
+| Keyboard shortcuts | The full list (also **Shift+?**) |
+
+A project can override these for its own new sessions: open the project and its **Settings** tab to choose a default agent (provider, model and effort, such as a cheaper model for a docs repository) and default permissions. A new session starts on what you pick there, else the project's defaults, else Settings; a model saved for one provider is never used on another. These are defaults for new sessions: a session that already exists keeps its own permissions, which you change in its **Permissions** picker, or for every open session at once with **Apply to open sessions** under the project's **Permissions** (see [Security](security.md#permissions)).
+
+## Stopping Agent Rishi
+
+- **Ctrl+C** in the terminal stops the server. Agents mid-turn keep running in the runner and are picked up again by the next `agent-rishi`.
+- `agent-rishi stop` stops both the server and the runner.
+
+## Next steps
+
+- [Workbench](workbench.md): diffs, checkpoints, terminal and browser.
+- [GitHub](github.md): issues, PRs and evidence.
+- [Automations](automations.md): put routine work on a schedule.
+- [Phones, tablets and network access](remote-access.md): open Agent Rishi from your phone.
+- [Troubleshooting](troubleshooting.md) if anything doesn't start.

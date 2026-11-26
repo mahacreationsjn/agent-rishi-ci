@@ -1,0 +1,621 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { messageFrom, type Session } from "@agent-rishi/contracts";
+import { createImageEngineRegistry, type ImageEngineRegistry } from "@agent-rishi/providers";
+import type { Db } from "../db/client";
+import type { EventStore } from "../events/store";
+import { noSandboxes, type SandboxService } from "../execution/sandboxes";
+import { ToolRegistry } from "../mcp/registry";
+import { McpTokenStore } from "../mcp/tokens";
+import { allTools } from "../mcp/tools";
+import type { HomePaths } from "../paths";
+import type { SettingsStore } from "../settings-store";
+import { AgentConfigService } from "./agent-config/agent-config-service";
+import { reportedCommands } from "./agent-config/slash-commands";
+import { ArtifactService } from "./artifacts";
+import { AutomationService, type AutomationServiceDeps } from "./automations/automation-service";
+import { TriageSettler } from "./automations/triage-settle";
+import { BrowserService } from "./browser/browser-service";
+import { type Exec, runTool } from "./exec";
+import { type FactoryOptions, FactoryService } from "./factory/factory-service";
+import { type FactoryGithub, GithubFactoryPort } from "./factory/github-port";
+import { FILE_RESET_NOTICES, reportFileReset } from "./file-reset-notice";
+import { ConfigFiles } from "./files/config-files";
+import { createGitBroker, type GitBroker } from "./git-broker";
+import { GithubService, type GithubServiceDeps } from "./github/github-service";
+import { projectTrustedAuthors } from "./github/review-trust";
+import { ImageService } from "./images/image-service";
+import { InboxService } from "./inbox-service";
+import { RunFailedSettler } from "./inbox-settle";
+import { GithubServicePort } from "./orchestration/github-port";
+import {
+  type OrchestrationOptions,
+  OrchestrationService,
+} from "./orchestration/orchestration-service";
+import type { AutomationPort, GithubPort } from "./orchestration/ports";
+import { ProjectService } from "./projects/project-service";
+import { ProjectRedetector } from "./projects/redetector";
+import { ProviderHistoryService } from "./providers/history";
+import {
+  isRemoteRunner,
+  type RunnerPort,
+  type RunnerRouter,
+  redetectProviders,
+  singleRunner,
+} from "./runner-port";
+import type { SecretStore } from "./secrets";
+import { AutoRetry, type AutoRetryDeps } from "./sessions/auto-retry";
+import { ChecksLoop } from "./sessions/checks-loop";
+import { GeneratedImages } from "./sessions/generated-images";
+import { SessionLauncher } from "./sessions/launcher";
+import { SessionLifecycle } from "./sessions/lifecycle";
+import { Outbox } from "./sessions/outbox";
+import { PrFeedbackService } from "./sessions/pr-feedback";
+import { QuestionBroker } from "./sessions/questions";
+import { QueueService } from "./sessions/queue";
+import { SessionRecovery } from "./sessions/recovery";
+import { SessionRepo } from "./sessions/repo";
+import { SessionService } from "./sessions/session-service";
+import { UnwatchedApprovals, type UnwatchedApprovalsDeps } from "./sessions/unwatched-approvals";
+import { WorktreeCleanup, type WorktreeCleanupDeps } from "./sessions/worktree-cleanup";
+import { ClaudeSdkService } from "./setup/claude-sdk";
+import { SetupService } from "./setup/setup-service";
+import { execLocate, type Locate } from "./setup/tool-lookup";
+import { DesktopUpdateService } from "./updates/desktop";
+import { notesSources, updateRegistry } from "./updates/registry";
+import { type SelfUpdateHost, UpdateService, type Updates } from "./updates/service";
+import { billingFromSetup } from "./usage/billing";
+import { UsageService } from "./usage/usage-service";
+import { ProviderUtilityService, runnerOneShot, type UtilityService } from "./utility";
+import { LocalSttService, type LocalSttServiceDeps } from "./voice/local/local-stt-service";
+import { VoiceService } from "./voice/voice-service";
+import { WorkbenchService } from "./workbench/workbench-service";
+import { remoteWorkspaceFs, type WorkspaceFs, workspaceFsFor } from "./workspace-fs/workspace-fs";
+
+export interface ServicesOptions {
+  db: Db;
+  store: EventStore;
+  settings: SettingsStore;
+  paths: HomePaths;
+  /** The home runner: provider detection, utility jobs, orchestrator and PMs. */
+  runner: RunnerPort;
+  /** Routes each session to its own runner (`docs/remote-runners.md` §8); default: `runner`. */
+  runners?: RunnerRouter;
+  /** Clone URLs and brokered git credentials for sandbox runners (§9); tests inject one. */
+  gitBroker?: GitBroker;
+  /**
+   * Containers for projects whose sessions run in them (`docs/remote-runners.md` §8); made by
+   * the server next to its runner hub. Without it every project runs locally.
+   */
+  sandboxes?: SandboxService;
+  secrets: SecretStore;
+  exec?: Exec;
+  /** Finds claude, codex and gh for the setup checks (tests fake it with `exec`). */
+  locate?: Locate;
+  /** Picks up PATH changes before a setup re-check (tests that pin PATH pass a no-op). */
+  refreshPath?: () => Promise<unknown>;
+  utility?: UtilityService;
+  /** Default clone location (`~/agent-rishi-projects`). */
+  projectsDir?: string;
+  /** User home for provider config roots (`~/.claude`, `~/.codex`). */
+  userHome?: string;
+  /** How long `ask_user` waits before returning "pending" (default 4 minutes). */
+  askUserWaitMs?: number;
+  /** Image engines (§12.5); Codex, Gemini and OpenAI with keychain API keys by default. */
+  imageEngines?: ImageEngineRegistry;
+  /** Cloud voice API base URLs (tests point them at a local stub). */
+  voice?: { elevenLabsBaseUrl?: string; openAiBaseUrl?: string };
+  /** Local Whisper downloads and runtime (tests serve fixtures and inject a fake runtime). */
+  localStt?: Pick<
+    LocalSttServiceDeps,
+    "fetch" | "platform" | "runtimePins" | "models" | "loadRuntime" | "idleUnloadMs"
+  >;
+  /** Orchestration seams and timings (§8): GitHub and automation ports, wake debounce. */
+  orchestration?: OrchestrationOptions & { github?: GithubPort; automation?: AutomationPort };
+  /** GitHub API transport and poll intervals (tests point them at a fake GitHub). */
+  github?: Pick<GithubServiceDeps, "fetch" | "baseUrl" | "idleIntervalMs" | "activeIntervalMs">;
+  /** Automation clock, scheduler timings and file rescans (tests). */
+  automations?: Pick<
+    AutomationServiceDeps,
+    "now" | "scheduler" | "templatesDir" | "rescanMs" | "fetch"
+  >;
+  /** Factory loop timings and its GitHub port (§10.1; tests pass a scripted GitHub). */
+  factory?: FactoryOptions & { github?: FactoryGithub };
+  /** How the hosting process was started and how it restarts into another version (§16). */
+  selfUpdate?: SelfUpdateHost;
+  /** Update check transport (tests). */
+  updates?: { fetch?: typeof fetch; intervalMs?: number };
+  /** Worktree cleanup clock and sweep timings (tests). */
+  worktreeCleanup?: Pick<WorktreeCleanupDeps, "now" | "intervalMs" | "initialDelayMs">;
+  /** Unwatched approvals: how long they wait for the user (tests shorten it). */
+  unwatchedApprovals?: Pick<UnwatchedApprovalsDeps, "waitMs" | "now">;
+  /** Shorter retry waits (tests). */
+  autoRetry?: Pick<AutoRetryDeps, "delaysMs" | "usageMarginMs">;
+  log?: (message: string) => void;
+}
+
+/** Every application service, wired together. Routes and the realtime hub use these. */
+export interface AppServices {
+  db: Db;
+  store: EventStore;
+  settings: SettingsStore;
+  paths: HomePaths;
+  /** The home runner (global work). Session work goes through `runners.forSession`. */
+  runner: RunnerPort;
+  /** Which runner serves each session. */
+  runners: RunnerRouter;
+  /** Execution backends and the sandboxes of projects whose sessions run in containers. */
+  sandboxes: SandboxService;
+  secrets: SecretStore;
+  utility: UtilityService;
+  projects: ProjectService;
+  /** Re-detects projects' git checkout and GitHub remote (§9): on demand, on start, after turns. */
+  redetector: ProjectRedetector;
+  sessionRepo: SessionRepo;
+  sessions: SessionService;
+  /** The queued-message tray: list, edit, delete and send-now. */
+  queue: QueueService;
+  lifecycle: SessionLifecycle;
+  recovery: SessionRecovery;
+  questions: QuestionBroker;
+  mcpTokens: McpTokenStore;
+  /** Agent Rishi's tool registry (§8.3), exposed over MCP and to API handlers. */
+  tools: ToolRegistry;
+  workbench: WorkbenchService;
+  inbox: InboxService;
+  /** Settles failed runs whose work moved on (§11.1), at startup and as work changes. */
+  inboxSettler: RunFailedSettler;
+  /** Resolves triage decisions whose issue closed on GitHub (§11.1). */
+  triageSettler: TriageSettler;
+  artifacts: ArtifactService;
+  /** Session browsers in the runner (§12.2), for the panel and the agent tools. */
+  browser: BrowserService;
+  /** `generate_image` engines, caps and the settings test (§12.5). */
+  images: ImageService;
+  /** Optional cloud text to speech and transcription (§11.3). */
+  voice: VoiceService;
+  /** Local Whisper: runtime and model downloads, and transcription (§11.3). */
+  localStt: LocalSttService;
+  /** Update checks and one-click self-update (§16; the desktop app's own updater, §17). */
+  updates: Updates;
+  setup: SetupService;
+  /** Claude Code support: the Claude Agent SDK, installed on demand (§14). */
+  claudeSdk: ClaudeSdkService;
+  configFiles: ConfigFiles;
+  /** Provider memory, skills, subagents and MCP servers (§12.4). */
+  agentConfig: AgentConfigService;
+  /** Orchestrator and PM sessions, digests, notices, conflicts (§8). */
+  orchestration: OrchestrationService;
+  /** GitHub connection, issue/PR sync, PRs and evidence (§9). */
+  github: GithubService;
+  /** Usage and cost reports, budgets and rate limits (§12.6). */
+  usage: UsageService;
+  /** Automations: definitions, scheduler, runs and issue triage (§10). */
+  automations: AutomationService;
+  /** Autonomy modes and the dark-factory loop (§10.1). */
+  factory: FactoryService;
+  /** Session archive and worktree cleanup (§9). */
+  worktreeCleanup: WorktreeCleanup;
+  /** Denies approvals nobody is there to answer, so unattended work never waits forever. */
+  unwatchedApprovals: UnwatchedApprovals;
+  /** Images made with a provider's own tools: stored as artifacts and shown inline. */
+  generatedImages: GeneratedImages;
+  /** CI failures, requested changes and conflicts sent to user-started sessions' agents (§9). */
+  prFeedback: PrFeedbackService;
+  /** Continues agent sessions after transient failures and usage limits. */
+  autoRetry: AutoRetry;
+  /** "Keep going until checks pass": runs a session's frozen checks after each turn (§9). */
+  checksLoop: ChecksLoop;
+  /** Hides Agent Rishi's conversations from providers' own apps (Settings → Providers). */
+  providerHistory: ProviderHistoryService;
+  userHome: string;
+  /** A session's files, on the server's disk or its runner's (`docs/remote-runners.md` §10). */
+  workspaceFs(session: Session): WorkspaceFs;
+}
+
+export function createServices(opts: ServicesOptions): AppServices {
+  const exec = opts.exec ?? runTool;
+  const userHome = opts.userHome ?? homedir();
+  const runners = opts.runners ?? singleRunner(opts.runner);
+  const sandboxes = opts.sandboxes ?? noSandboxes(opts.db, opts.runner);
+  const utility =
+    opts.utility ??
+    new ProviderUtilityService({
+      settings: () => opts.settings.get(),
+      oneShot: runnerOneShot(opts.runner),
+    });
+  const projects = new ProjectService({
+    db: opts.db,
+    store: opts.store,
+    exec,
+    projectsDir: opts.projectsDir ?? join(userHome, "agent-rishi-projects"),
+  });
+  const sessionRepo = new SessionRepo(opts.db, opts.store);
+  const artifacts = new ArtifactService(opts.db, opts.store, opts.paths.artifacts);
+  const outbox = new Outbox(opts.db, opts.store);
+  const mcpTokens = new McpTokenStore(opts.db);
+  const questions = new QuestionBroker({
+    db: opts.db,
+    store: opts.store,
+    waitMs: opts.askUserWaitMs,
+    sendMessage: () => async (sessionId, text, by) => {
+      const input = by === "pm" ? messageFrom("pm", text) : { text, attachments: [] };
+      await sessions?.send(sessionId, { input, whenBusy: "queue" }, by);
+    },
+  });
+  let sessions: SessionService | undefined;
+  const inbox = new InboxService(opts.db, opts.store, () => (sessionId, requestId, response) => {
+    if (!sessions) throw new Error("Session service not ready");
+    return sessions.respond(sessionId, { requestId, response });
+  });
+  // Runners that don't share this disk clone the project and get git credentials per operation
+  // (§9.2). The token is read when an operation needs it, from the GitHub connection below.
+  const gitBroker =
+    opts.gitBroker ??
+    createGitBroker({ exec, token: async () => (await github.auth.token())?.value ?? null });
+  const launcher = new SessionLauncher({
+    repo: sessionRepo,
+    projects,
+    runner: opts.runner,
+    runners,
+    inbox,
+    home: opts.paths.home,
+    artifacts,
+    worktreesDir: opts.paths.worktrees,
+    orchestratorDir: opts.paths.orchestrator,
+    tokens: mcpTokens,
+    git: gitBroker,
+    sandboxes,
+    tokenSaver: () => opts.settings.get().tokenSaver,
+    log: opts.log,
+  });
+  // Before the session service: a start in a project the start-up check hasn't reached checks it.
+  const redetector = new ProjectRedetector({
+    projects,
+    store: opts.store,
+    repo: sessionRepo,
+    onGithubChanged: (projectId) => github.sync.soon(projectId, { now: true }),
+    log: opts.log,
+  });
+  sessions = new SessionService({
+    repo: sessionRepo,
+    projects,
+    runner: opts.runner,
+    runners,
+    inbox,
+    artifacts,
+    settings: opts.settings,
+    launcher,
+    outbox,
+    questions,
+    tokens: mcpTokens,
+    utility,
+    sandboxes,
+    projectChecks: redetector,
+  });
+  const checksLoop = new ChecksLoop({
+    db: opts.db,
+    store: opts.store,
+    repo: sessionRepo,
+    project: (id) => {
+      try {
+        return projects.get(id);
+      } catch {
+        return undefined;
+      }
+    },
+    runnerOf: (id) => runners.forSession(id),
+    send: (id, input) => sessions.send(id, { input, whenBusy: "queue" }, "agent-rishi"),
+    hasPendingMessage: (id) => sessions.hasOutbox(id) || sessions.isDelivering(id),
+    log: opts.log,
+  });
+  sessions.setCheckRuns(checksLoop);
+  const queue = new QueueService({
+    outbox,
+    repo: sessionRepo,
+    sessions,
+    artifacts,
+    providers: (sessionId) => runners.forSession(sessionId).providers(),
+  });
+  const lifecycle = new SessionLifecycle({
+    db: opts.db,
+    store: opts.store,
+    repo: sessionRepo,
+    sessions,
+    settings: opts.settings,
+    utility,
+    tokens: mcpTokens,
+    log: opts.log,
+  });
+  const github = new GithubService({
+    db: opts.db,
+    store: opts.store,
+    projects,
+    repo: sessionRepo,
+    runner: opts.runner,
+    runners,
+    artifacts,
+    inbox,
+    exec,
+    secrets: opts.secrets,
+    home: opts.paths.home,
+    git: gitBroker,
+    ...opts.github,
+    log: opts.log,
+  });
+  // The factory and issue triage share it, so both trust the same issue authors.
+  const factoryGithub = opts.factory?.github ?? new GithubFactoryPort(github);
+  const trustedAuthors = projectTrustedAuthors(projects);
+  const setup = new SetupService({
+    exec,
+    settings: opts.settings,
+    // Tests that bring their own `exec` fake every CLI; the look-up goes through it too.
+    locate: opts.locate ?? (opts.exec ? execLocate(opts.exec) : undefined),
+    refreshPath: opts.refreshPath,
+    userHome,
+    // After an install or a login is re-checked, the runner's model lists follow.
+    onChecked: () => redetectProviders(opts.runner, opts.log),
+  });
+  const claudeSdk = new ClaudeSdkService({ depsDir: opts.paths.deps, log: opts.log });
+  const localStt = new LocalSttService({
+    runtimeDir: join(opts.paths.deps, "whisper"),
+    modelsDir: join(opts.paths.models, "whisper"),
+    settings: opts.settings,
+    ...opts.localStt,
+    log: opts.log,
+  });
+  const automations = new AutomationService({
+    db: opts.db,
+    store: opts.store,
+    settings: opts.settings,
+    projects,
+    sessions,
+    repo: sessionRepo,
+    inbox,
+    orchestration: () => services.orchestration,
+    github: factoryGithub,
+    home: opts.paths.home,
+    ...opts.automations,
+    log: opts.log,
+  });
+  const usage = new UsageService({
+    db: opts.db,
+    store: opts.store,
+    settingsFile: join(opts.paths.home, "usage-settings.json"),
+    billing: async () => (setup.lastStatus ? billingFromSetup(setup.lastStatus) : {}),
+    log: opts.log,
+  });
+  const orchestration = new OrchestrationService({
+    db: opts.db,
+    store: opts.store,
+    repo: sessionRepo,
+    sessions,
+    projects,
+    inbox,
+    settings: opts.settings,
+    runner: opts.runner,
+    artifacts,
+    github: opts.orchestration?.github ?? new GithubServicePort(github),
+    trustedAuthors,
+    automation: opts.orchestration?.automation ?? automations,
+    timezone: () => usage.timezone(),
+    // The factory is created below; a role's fallback and the digest ask it when needed.
+    readyProviders: async () =>
+      (await factory.providerChoices()).flatMap((c) => (c.runnable ? [c.id] : [])),
+    factoryLoop: (projectId) => factory.loopSummary(projectId),
+    options: opts.orchestration,
+    log: opts.log,
+  });
+  const providerHistory = new ProviderHistoryService({ db: opts.db, runner: opts.runner, runners });
+  const worktreeCleanup = new WorktreeCleanup({
+    repo: sessionRepo,
+    projects,
+    runner: opts.runner,
+    runners,
+    store: opts.store,
+    settings: () => opts.settings.get(),
+    stopSession: (id) => (sessions as SessionService).stop(id),
+    sandboxes,
+    inbox,
+    ...opts.worktreeCleanup,
+    log: opts.log,
+  });
+  const factory = new FactoryService({
+    db: opts.db,
+    store: opts.store,
+    projects,
+    repo: sessionRepo,
+    sessions,
+    runner: opts.runner,
+    usage,
+    inbox,
+    notify: (draft, wake) => orchestration.notify(draft, wake),
+    settings: opts.settings,
+    exec,
+    github: factoryGithub,
+    complete: (job, system, prompt) => utility.complete(job, system, prompt),
+    archiveSession: (id) => worktreeCleanup.archive(id),
+    options: opts.factory,
+    log: opts.log,
+  });
+  const unwatchedApprovals = new UnwatchedApprovals({
+    store: opts.store,
+    repo: sessionRepo,
+    projects,
+    inbox,
+    respond: (id, req) => (sessions as SessionService).respond(id, req),
+    ...opts.unwatchedApprovals,
+    log: opts.log,
+  });
+  const services: AppServices = {
+    db: opts.db,
+    store: opts.store,
+    settings: opts.settings,
+    paths: opts.paths,
+    runner: opts.runner,
+    runners,
+    sandboxes,
+    secrets: opts.secrets,
+    utility,
+    projects,
+    redetector,
+    sessionRepo,
+    sessions,
+    queue,
+    lifecycle,
+    recovery: new SessionRecovery({
+      repo: sessionRepo,
+      sessions,
+      launcher,
+      runner: opts.runner,
+      runners,
+      sweepVendorHistory: (runner, skip) => providerHistory.sweep(runner, skip),
+      log: opts.log,
+    }),
+    inbox,
+    inboxSettler: new RunFailedSettler({
+      store: opts.store,
+      repo: sessionRepo,
+      inbox,
+      factoryItems: (projectId) => factory.data.items(projectId),
+      log: opts.log,
+    }),
+    triageSettler: new TriageSettler({
+      store: opts.store,
+      inbox,
+      issue: (projectId, number) => github.data.issue(projectId, number),
+      log: opts.log,
+    }),
+    artifacts,
+    browser: new BrowserService({
+      runner: opts.runner,
+      runners,
+      repo: sessionRepo,
+      settings: () => opts.settings.get(),
+      log: opts.log,
+    }),
+    updates: createUpdates(opts),
+    images: new ImageService({
+      registry: opts.imageEngines ?? defaultImageEngines(opts.secrets),
+      settings: opts.settings,
+      artifacts,
+      repo: sessionRepo,
+      usageFile: join(opts.paths.home, "image-usage.json"),
+      onUsageReset: (reset) =>
+        reportFileReset(reset, FILE_RESET_NOTICES.imageUsage, { store: opts.store, log: opts.log }),
+      generatedDir: join(opts.paths.home, "generated"),
+      remoteWorkspace: (session) => remoteWorkspaceFs({ runner: opts.runner, runners }, session),
+      log: opts.log,
+    }),
+    voice: new VoiceService({
+      secrets: opts.secrets,
+      settings: opts.settings,
+      local: localStt,
+      ...opts.voice,
+    }),
+    localStt,
+    setup,
+    claudeSdk,
+    usage,
+    factory,
+    worktreeCleanup,
+    unwatchedApprovals,
+    generatedImages: new GeneratedImages({
+      db: opts.db,
+      store: opts.store,
+      repo: sessionRepo,
+      artifacts,
+      runner: opts.runner,
+      runners,
+      log: opts.log,
+    }),
+    prFeedback: new PrFeedbackService({
+      store: opts.store,
+      repo: sessionRepo,
+      settings: () => opts.settings.get(),
+      send: (id, input) => sessions.send(id, { input, whenBusy: "queue" }, "agent-rishi"),
+      trustedAuthors,
+      log: opts.log,
+    }),
+    providerHistory,
+    checksLoop,
+    autoRetry: new AutoRetry({
+      db: opts.db,
+      store: opts.store,
+      repo: sessionRepo,
+      inbox,
+      settings: () => opts.settings.get(),
+      send: (id, input) => sessions.send(id, { input, whenBusy: "queue" }, "agent-rishi"),
+      ...opts.autoRetry,
+      log: opts.log,
+    }),
+    configFiles: new ConfigFiles({
+      projects,
+      home: userHome,
+      backupDir: join(opts.paths.backups, "files"),
+    }),
+    agentConfig: new AgentConfigService({
+      home: userHome,
+      projects,
+      repo: sessionRepo,
+      backupDir: join(opts.paths.backups, "agent-config"),
+      disabledHooksFile: opts.paths.disabledHooks,
+      // The proxy the session's own runner gave its agent; MCP tests stay on the home runner.
+      mcpProxyUrl: (sessionId) => runners.forSession(sessionId).mcpProxyUrl(),
+      runner: opts.runner,
+      reportedCommands: (sessionId) => reportedCommands(opts.db, sessionId),
+      isRemote: (sessionId) => isRemoteRunner(runners.forSession(sessionId)),
+    }),
+    github,
+    orchestration,
+    automations,
+    userHome,
+    questions,
+    mcpTokens,
+    workbench: new WorkbenchService({
+      db: opts.db,
+      repo: sessionRepo,
+      runner: opts.runner,
+      runners,
+      projects,
+      git: gitBroker,
+    }),
+    tools: undefined as unknown as ToolRegistry,
+    workspaceFs: (session) =>
+      workspaceFsFor({ runner: opts.runner, runners, home: opts.paths.home }, session),
+  };
+  services.tools = new ToolRegistry(allTools, services, opts.log);
+  return services;
+}
+
+/** The built-in image engines, reading Gemini and OpenAI keys from the OS keychain. */
+function defaultImageEngines(secrets: SecretStore): ImageEngineRegistry {
+  const key = (name: "gemini.apiKey" | "openai.apiKey") => async () =>
+    (await secrets.get(name)) ?? undefined;
+  return createImageEngineRegistry({
+    gemini: { apiKey: key("gemini.apiKey") },
+    openai: { apiKey: key("openai.apiKey") },
+  });
+}
+
+/** Self-update (npm, or the desktop app's updater): off by default, see `checksDisabled`. */
+function createUpdates(opts: ServicesOptions): Updates {
+  const common = {
+    mode: () => opts.settings.get().updates.mode,
+    // Off unless asked for (the update tests): Agent Rishi updates from its git repository, and
+    // no npm package or release feed is its own.
+    checksDisabled: process.env.AGENT_RISHI_UPDATE_CHECK !== "1",
+    notes: notesSources(),
+    fetch: opts.updates?.fetch,
+    intervalMs: opts.updates?.intervalMs,
+    log: opts.log,
+  };
+  const desktop = opts.selfUpdate?.desktop;
+  if (desktop) return new DesktopUpdateService({ ...common, desktop });
+  return new UpdateService({
+    ...common,
+    home: opts.paths.home,
+    host: opts.selfUpdate,
+    registry: updateRegistry(),
+  });
+}

@@ -1,0 +1,203 @@
+import {
+  type Automation,
+  type AutomationExport,
+  AutomationImportLinkRequest,
+  type AutomationImportLinkResponse,
+  AutomationImportSource,
+  AutomationProjectRequest,
+  type AutomationProjectSettings,
+  CreateAutomationRequest,
+  DuplicateAutomationRequest,
+  ExportAutomationsQuery,
+  type ExportAutomationsResponse,
+  ImportAutomationsRequest,
+  type ImportAutomationsResponse,
+  ListAutomationRunsQuery,
+  ListAutomationsQuery,
+  RunAutomationRequest,
+  SetAutomationEnabledRequest,
+  StarterSetRequest,
+  type StarterSetResponse,
+  TriageDecisionRequest,
+  UpcomingRunsQuery,
+  UpdateAutomationProjectSettingsRequest,
+  UpdateAutomationRequest,
+} from "@agent-rishi/contracts";
+import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import { zipAutomations } from "../services/automations/import";
+import { exportAutomation } from "../services/automations/markdown";
+import type { AppServices } from "../services/container";
+import { jsonBody, queryOf } from "./validate";
+
+/** Item for one automation, scoped to a project when given. */
+function itemOf(s: AppServices, automation: Automation, projectId?: string) {
+  const found = s.automations
+    .list(projectId)
+    .automations.find((i) => i.automation.id === automation.id);
+  return found ?? { automation, states: [], lastRun: null, path: null, readOnly: true };
+}
+
+/** Imports are small text files; refuse bodies past 2 MB before parsing them (413). */
+const importLimit = bodyLimit({
+  maxSize: 2 * 1024 * 1024,
+  onError: (c) =>
+    c.json({ error: { code: "import_too_large", message: "The import is too large" } }, 413),
+});
+
+/**
+ * `/api/automations` (§10): definitions, enable/disable, run now, pause/resume/skip, runs
+ * history, upcoming runs (the Now / Next strip), templates, sharing (export, and import from
+ * files or a link) and triage decisions.
+ */
+export function automationRoutes(s: AppServices) {
+  const a = s.automations;
+  return new Hono()
+    .get("/", queryOf(ListAutomationsQuery), (c) => c.json(a.list(c.req.valid("query").projectId)))
+    .post("/", jsonBody(CreateAutomationRequest), (c) => {
+      const created = a.definitions.create(c.req.valid("json"));
+      a.refresh();
+      return c.json(itemOf(s, created), 201);
+    })
+    .get("/templates", (c) => c.json(a.sources.templates()))
+    .get("/export", queryOf(ExportAutomationsQuery), (c) => {
+      const { projectId } = c.req.valid("query");
+      const list = a.list(projectId).automations.map((i) => i.automation);
+      const body: ExportAutomationsResponse = {
+        fileName: "agent-rishi-automations.zip",
+        zipBase64: zipAutomations(list),
+        count: list.length,
+      };
+      return c.json(body);
+    })
+    .post("/import/preview", importLimit, jsonBody(AutomationImportSource), (c) =>
+      c.json({ items: a.definitions.previewImport(c.req.valid("json")) }),
+    )
+    .post("/import/link", jsonBody(AutomationImportLinkRequest), async (c) =>
+      c.json<AutomationImportLinkResponse>(
+        await a.definitions.previewLink(c.req.valid("json").url),
+      ),
+    )
+    .post("/import", importLimit, jsonBody(ImportAutomationsRequest), (c) => {
+      const req = c.req.valid("json");
+      const result = a.definitions.importFrom(req);
+      a.refresh();
+      const body: ImportAutomationsResponse = {
+        created: result.created.map((x) => itemOf(s, x, req.projectId)),
+        failed: result.failed,
+      };
+      return c.json(body, 201);
+    })
+    .get("/upcoming", queryOf(UpcomingRunsQuery), (c) => {
+      const q = c.req.valid("query");
+      return c.json(a.listScheduledRuns(q.projectId ?? null, q.limit));
+    })
+    .get("/runs", queryOf(ListAutomationRunsQuery), (c) =>
+      c.json(a.runs.list(c.req.valid("query"))),
+    )
+    .get("/runs/:runId", (c) => c.json(a.runs.get(c.req.param("runId"))))
+    .post("/runs/:runId/cancel", async (c) => {
+      const run = a.runs.get(c.req.param("runId"));
+      await a.cancelQueuedRun(run.id, run.projectId ?? "");
+      return c.json(a.runs.get(run.id));
+    })
+    .post("/reload", (c) => {
+      a.sources.reload();
+      a.refresh();
+      return c.json(a.list());
+    })
+    .post("/triage/:itemId/accept", jsonBody(TriageDecisionRequest), async (c) =>
+      c.json(await a.triage.accept(c.req.param("itemId"), c.req.valid("json"))),
+    )
+    .post("/triage/:itemId/decline", jsonBody(TriageDecisionRequest), (c) =>
+      c.json(a.triage.decline(c.req.param("itemId"), c.req.valid("json"))),
+    )
+    .get("/:id", (c) => c.json(itemOf(s, a.definitions.get(c.req.param("id")))))
+    .patch("/:id", jsonBody(UpdateAutomationRequest), (c) => {
+      const updated = a.definitions.update(c.req.param("id"), c.req.valid("json"));
+      a.refresh();
+      return c.json(itemOf(s, updated));
+    })
+    .get("/:id/export", (c) =>
+      c.json<AutomationExport>(exportAutomation(a.definitions.get(c.req.param("id")))),
+    )
+    .post("/:id/duplicate", jsonBody(DuplicateAutomationRequest), (c) => {
+      const copy = a.definitions.duplicate(c.req.param("id"), c.req.valid("json"));
+      a.refresh();
+      return c.json(itemOf(s, copy), 201);
+    })
+    .delete("/:id", (c) => {
+      a.definitions.remove(c.req.param("id"));
+      a.refresh();
+      return c.json({ ok: true as const });
+    })
+    .post("/:id/enable", jsonBody(SetAutomationEnabledRequest), (c) => {
+      const { projectId } = c.req.valid("json");
+      const updated = a.definitions.setEnabled(c.req.param("id"), true, projectId);
+      a.refresh();
+      return c.json(itemOf(s, updated, projectId));
+    })
+    .post("/:id/disable", jsonBody(SetAutomationEnabledRequest), (c) => {
+      const { projectId } = c.req.valid("json");
+      const updated = a.definitions.setEnabled(c.req.param("id"), false, projectId);
+      a.refresh();
+      return c.json(itemOf(s, updated, projectId));
+    })
+    .post("/:id/clear-override", jsonBody(AutomationProjectRequest), (c) => {
+      const { projectId } = c.req.valid("json");
+      const updated = a.definitions.clearOverride(c.req.param("id"), projectId);
+      a.refresh();
+      return c.json(itemOf(s, updated, projectId));
+    })
+    .post("/:id/run", jsonBody(RunAutomationRequest), async (c) =>
+      // The user's "Run now": it runs at the permission level it asks for.
+      c.json(await a.run(c.req.param("id"), c.req.valid("json"), { byPerson: true })),
+    )
+    .post("/:id/pause", jsonBody(AutomationProjectRequest), async (c) => {
+      const { projectId } = c.req.valid("json");
+      await a.pause(c.req.param("id"), projectId);
+      return c.json(itemOf(s, a.definitions.get(c.req.param("id")), projectId));
+    })
+    .post("/:id/resume", jsonBody(AutomationProjectRequest), async (c) => {
+      const { projectId } = c.req.valid("json");
+      await a.resume(c.req.param("id"), projectId);
+      return c.json(itemOf(s, a.definitions.get(c.req.param("id")), projectId));
+    })
+    .post("/:id/skip-next", jsonBody(AutomationProjectRequest), async (c) => {
+      const { projectId } = c.req.valid("json");
+      return c.json({ skipped: await a.skipNextRun(c.req.param("id"), projectId) });
+    })
+    .post("/:id/unskip-next", jsonBody(AutomationProjectRequest), async (c) => {
+      const { projectId } = c.req.valid("json");
+      return c.json({ next: await a.unskipNextRun(c.req.param("id"), projectId) });
+    });
+}
+
+/** `/api/projects/:id/automations/...`: the starter set and the project's automation switch. */
+export function projectAutomationRoutes(s: AppServices) {
+  const a = s.automations;
+  return new Hono()
+    .post("/:projectId/automations/starter", jsonBody(StarterSetRequest), (c) => {
+      const body: StarterSetResponse = {
+        automations: a.definitions.starterSet(c.req.param("projectId"), c.req.valid("json").enable),
+      };
+      a.refresh();
+      return c.json(body);
+    })
+    .get("/:projectId/automations/settings", (c) => {
+      const projectId = c.req.param("projectId");
+      s.projects.get(projectId);
+      return c.json<AutomationProjectSettings>(a.schedules.projectSettings(projectId));
+    })
+    .patch(
+      "/:projectId/automations/settings",
+      jsonBody(UpdateAutomationProjectSettingsRequest),
+      (c) => {
+        const projectId = c.req.param("projectId");
+        s.projects.get(projectId);
+        const body = a.schedules.setProjectEnabled(projectId, c.req.valid("json").enabled);
+        a.refresh();
+        return c.json<AutomationProjectSettings>(body);
+      },
+    );
+}

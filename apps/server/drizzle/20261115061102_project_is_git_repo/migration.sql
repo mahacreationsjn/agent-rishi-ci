@@ -1,0 +1,1 @@
+ALTER TABLE `projects` ADD `is_git_repo` integer DEFAULT true NOT NULL;

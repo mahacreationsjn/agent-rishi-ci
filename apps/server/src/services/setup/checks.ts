@@ -1,0 +1,374 @@
+import type { SetupToolId } from "@agent-rishi/contracts";
+import { CLAUDE_MIN_VERSION, CODEX_MIN_VERSION, isElectronRuntime } from "@agent-rishi/providers";
+import { detectBrowser } from "./browsers";
+import { checkAntigravity } from "./check-antigravity";
+import { base, type CheckEnv, type CheckResult, installFix, MIN_NODE_MAJOR } from "./check-base";
+import { checkCursor } from "./check-cursor";
+import { checkGemini } from "./check-gemini";
+import {
+  expiresWithin,
+  parseClaudeAuth,
+  parseCodexLogin,
+  parseGhAuthJson,
+  parseGhAuthText,
+  parseOpenCodeAuth,
+  parseVersion,
+} from "./parse";
+import { LOGIN_COMMANDS, loginFix, lookupTool, runDetail } from "./tool-lookup";
+
+export type { CheckEnv };
+export { LOGIN_COMMANDS, MIN_NODE_MAJOR };
+
+/** Oldest OpenCode with the v2 server API the adapter uses (OpenCode 1 is a different API). */
+export const OPENCODE_MIN_VERSION = "2.2.0";
+
+/** Days before `loginExpiresAt` at which a Claude login is flagged. */
+export const LOGIN_EXPIRY_WARNING_DAYS = 3;
+
+/**
+ * The check for a copy older than the provider's minimum, else null. It comes before the
+ * sign-in state, which an old copy can't report reliably (and signing in would not fix).
+ */
+function outdated(
+  installed: Omit<CheckResult, "state" | "message">,
+  minVersion: string,
+  upgrade: string,
+): CheckResult | null {
+  const { version, executablePath: file } = installed;
+  if (!version || compareVersions(version, minVersion) >= 0) return null;
+  return {
+    ...installed,
+    state: "warning",
+    message: `${installed.label} ${version} is older than ${minVersion}; update it`,
+    detail: `Found at \`${file}\`. No copy of version ${minVersion} or newer was found on PATH or in the usual install folders. Update this copy, or remove it if a newer one is installed elsewhere.`,
+    fix: { kind: "upgrade", command: upgrade },
+  };
+}
+
+export async function checkClaude({
+  exec,
+  locate,
+  shell,
+  platform,
+  now,
+}: CheckEnv): Promise<CheckResult> {
+  const tool = await lookupTool(
+    locate,
+    "claude",
+    base("claude"),
+    { message: "Claude Code is not installed", fix: installFix("claude", platform) },
+    { minVersion: CLAUDE_MIN_VERSION },
+  );
+  if (!tool.found) return tool.result;
+  const installed = {
+    ...base("claude"),
+    ...tool.extra,
+    installed: true,
+    version: tool.version,
+    executablePath: tool.path,
+  };
+  const old = outdated(installed, CLAUDE_MIN_VERSION, "claude update");
+  if (old) return old;
+  const login = loginFix("claude", shell, tool.path);
+  const status = await exec(tool.path, ["auth", "status"], { timeoutMs: 10_000 });
+  const auth = parseClaudeAuth(status.stdout);
+  if (!auth) {
+    return {
+      ...installed,
+      state: "warning",
+      message: "Could not read the Claude login state",
+      detail: runDetail("claude auth status", status),
+      fix: login,
+    };
+  }
+  const withAuth = { ...installed, ...auth };
+  if (!auth.loggedIn) {
+    return { ...withAuth, state: "missing", message: "Not signed in to Claude", fix: login };
+  }
+  if (expiresWithin(auth.loginExpiresAt, LOGIN_EXPIRY_WARNING_DAYS, now)) {
+    return {
+      ...withAuth,
+      state: "warning",
+      message: "Your Claude login expires soon; sign in again",
+      fix: login,
+    };
+  }
+  return { ...withAuth, state: "ok", message: "Signed in" };
+}
+
+export async function checkCodex({
+  exec,
+  locate,
+  shell,
+  platform,
+}: CheckEnv): Promise<CheckResult> {
+  const tool = await lookupTool(
+    locate,
+    "codex",
+    base("codex"),
+    { message: "Codex is not installed", fix: installFix("codex", platform) },
+    { minVersion: CODEX_MIN_VERSION },
+  );
+  if (!tool.found) return tool.result;
+  const installed = {
+    ...base("codex"),
+    ...tool.extra,
+    installed: true,
+    version: tool.version,
+    executablePath: tool.path,
+  };
+  const old = outdated(installed, CODEX_MIN_VERSION, "npm install -g @openai/codex@latest");
+  if (old) return old;
+  const status = await exec(tool.path, ["login", "status"], { timeoutMs: 10_000 });
+  const login = parseCodexLogin(
+    status.code,
+    `${status.stdout}
+${status.stderr}`,
+  );
+  if (!login.loggedIn) {
+    return {
+      ...installed,
+      loggedIn: false,
+      state: "missing",
+      message: "Not signed in to Codex",
+      ...(status.code !== 0 && !/not logged in/i.test(`${status.stdout}${status.stderr}`)
+        ? { detail: runDetail("codex login status", status) }
+        : {}),
+      fix: loginFix("codex", shell, tool.path),
+    };
+  }
+  return {
+    ...installed,
+    loggedIn: true,
+    authMethod: login.authMethod,
+    state: "ok",
+    message: "Signed in",
+  };
+}
+
+/**
+ * A working `opencode` (PATH, then its installer's folders), then `opencode auth list` on a
+ * private server (`--standalone`), never the user's background service.
+ */
+export async function checkOpenCode({
+  exec,
+  locate,
+  shell,
+  platform,
+}: CheckEnv): Promise<CheckResult> {
+  const tool = await lookupTool(
+    locate,
+    "opencode",
+    base("opencode"),
+    { message: "OpenCode is not installed", fix: installFix("opencode", platform) },
+    { minVersion: OPENCODE_MIN_VERSION },
+  );
+  if (!tool.found) return tool.result;
+  const found = tool.version;
+  const installed = {
+    ...base("opencode"),
+    ...tool.extra,
+    installed: true,
+    version: found,
+    executablePath: tool.path,
+  };
+  if (found && compareVersions(found, "2.0.0") < 0) {
+    return {
+      ...installed,
+      state: "missing",
+      message: `OpenCode ${found} is OpenCode 1, which Agent Rishi does not support; install OpenCode 2`,
+      fix: installFix("opencode", platform),
+    };
+  }
+  if (found && compareVersions(found, OPENCODE_MIN_VERSION) < 0) {
+    return {
+      ...installed,
+      state: "warning",
+      message: `OpenCode ${found} is older than ${OPENCODE_MIN_VERSION}; update it`,
+      fix: { kind: "upgrade", command: "opencode upgrade" },
+    };
+  }
+  const login = loginFix("opencode", shell, tool.path);
+  const list = await exec(tool.path, ["auth", "list", "--standalone", "--format", "json"], {
+    timeoutMs: 15_000,
+  });
+  const auth = list.code === 0 ? parseOpenCodeAuth(list.stdout) : null;
+  if (!auth) {
+    return {
+      ...installed,
+      state: "warning",
+      message: "Could not read OpenCode's providers",
+      detail: runDetail("opencode auth list --standalone --format json", list),
+      fix: login,
+    };
+  }
+  if (!auth.providers.length) {
+    // OpenCode's own free models work without an account.
+    return {
+      ...installed,
+      loggedIn: true,
+      authMethod: "free",
+      state: "warning",
+      message: "Only OpenCode's free models: connect a provider for more",
+      fix: login,
+    };
+  }
+  return {
+    ...installed,
+    loggedIn: true,
+    authMethod: auth.authMethod,
+    account: auth.providers.join(", "),
+    state: "ok",
+    message: `Connected: ${auth.providers.join(", ")}`,
+  };
+}
+
+/** Compare `x.y.z` versions numerically. */
+function compareVersions(a: string, b: string): number {
+  const pa = a.split(/[.-]/).map((n) => Number.parseInt(n, 10) || 0);
+  const pb = b.split(/[.-]/).map((n) => Number.parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i += 1) {
+    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+export async function checkGh({ exec, locate, shell, platform }: CheckEnv): Promise<CheckResult> {
+  const tool = await lookupTool(locate, "gh", base("gh"), {
+    message: "GitHub CLI is not installed (optional)",
+    fix: installFix("gh", platform),
+  });
+  if (!tool.found) return tool.result;
+  const installed = {
+    ...base("gh"),
+    ...tool.extra,
+    installed: true,
+    version: tool.version,
+    executablePath: tool.path,
+  };
+  // `--json hosts` never includes the token; the text fallback is parsed for the login only.
+  const json = await exec(tool.path, ["auth", "status", "--json", "hosts"], { timeoutMs: 10_000 });
+  let auth = parseGhAuthJson(json.stdout);
+  if (!auth) {
+    const text = await exec(tool.path, ["auth", "status"], { timeoutMs: 10_000 });
+    auth = parseGhAuthText(
+      text.code,
+      `${text.stdout}
+${text.stderr}`,
+    );
+  }
+  if (!auth.loggedIn) {
+    return {
+      ...installed,
+      loggedIn: false,
+      state: "missing",
+      message: "Not signed in to GitHub",
+      fix: loginFix("gh", shell, tool.path),
+    };
+  }
+  return { ...installed, loggedIn: true, account: auth.account, state: "ok", message: "Signed in" };
+}
+
+export async function checkGit({ exec, platform }: CheckEnv): Promise<CheckResult> {
+  const check = base("git");
+  const version = await exec("git", ["--version"], { timeoutMs: 10_000 });
+  if (version.notFound || version.code !== 0) {
+    return {
+      ...check,
+      state: "missing",
+      message: "git is not installed",
+      fix: installFix("git", platform),
+    };
+  }
+  const [name, email] = await Promise.all([
+    exec("git", ["config", "--get", "user.name"], { timeoutMs: 5_000 }),
+    exec("git", ["config", "--get", "user.email"], { timeoutMs: 5_000 }),
+  ]);
+  const user = name.stdout.trim();
+  const mail = email.stdout.trim();
+  const installed = {
+    ...check,
+    installed: true,
+    version: parseVersion(version.stdout),
+    executablePath: version.path,
+    account: user && mail ? `${user} <${mail}>` : user || mail || null,
+  };
+  if (!user || !mail) {
+    return {
+      ...installed,
+      state: "warning",
+      message: "git user.name and user.email are not set",
+      fix: {
+        kind: "configure",
+        command:
+          'git config --global user.name "Your Name" && git config --global user.email you@example.com',
+      },
+    };
+  }
+  return { ...installed, state: "ok", message: "Identity configured" };
+}
+
+export async function checkBrowser({
+  exec,
+  platform,
+  browserProbe,
+}: CheckEnv): Promise<CheckResult> {
+  const check = base("browser");
+  const found = await detectBrowser({
+    platform,
+    ...browserProbe,
+    exec: browserProbe?.exec ?? exec,
+  });
+  if (!found) {
+    return {
+      ...check,
+      state: "warning",
+      message: "No Edge or Chrome found (needed for the browser panel)",
+      fix: installFix("browser", platform),
+    };
+  }
+  return {
+    ...check,
+    installed: true,
+    executablePath: found.path,
+    state: "ok",
+    message: found.name,
+  };
+}
+
+export async function checkNode({ nodeVersion, platform }: CheckEnv): Promise<CheckResult> {
+  const check = {
+    ...base("node"),
+    installed: true,
+    version: nodeVersion.replace(/^v/, ""),
+    executablePath: process.execPath,
+  };
+  const major = Number(/^v?(\d+)/.exec(nodeVersion)?.[1] ?? 0);
+  if (major < MIN_NODE_MAJOR) {
+    return {
+      ...check,
+      state: "missing",
+      message: `Node.js ${MIN_NODE_MAJOR}+ is required`,
+      fix: installFix("node", platform),
+    };
+  }
+  // The desktop app runs on the Node.js built into it; no system Node.js is needed (§17).
+  if (isElectronRuntime()) {
+    return { ...check, state: "ok", message: `Node.js ${check.version} (built into the app)` };
+  }
+  return { ...check, state: "ok", message: `Node.js ${check.version}` };
+}
+
+export const CHECKS: Record<SetupToolId, (env: CheckEnv) => Promise<CheckResult>> = {
+  claude: checkClaude,
+  codex: checkCodex,
+  opencode: checkOpenCode,
+  cursor: checkCursor,
+  gemini: checkGemini,
+  antigravity: checkAntigravity,
+  gh: checkGh,
+  git: checkGit,
+  browser: checkBrowser,
+  node: checkNode,
+};

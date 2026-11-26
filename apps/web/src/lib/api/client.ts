@@ -1,0 +1,343 @@
+import type {
+  ArchivedSessionsPage,
+  ArchivedSessionsQueryInit,
+  ArchiveSessionResponse,
+  ClaudeSdkStatus,
+  CompactSessionResponse,
+  ConflictRecord,
+  CreateProjectRequest,
+  CreateProjectResponse,
+  DiffResult,
+  DiffScope,
+  DisconnectGithubResponse,
+  DismissInboxResponse,
+  ExecutionBackendsResponse,
+  ForkSessionRequest,
+  ForkSessionResponse,
+  FsListResponse,
+  GitCommitRequest,
+  GitCommitResponse,
+  GitPushRequest,
+  GitPushResponse,
+  GitStatusResponse,
+  HandoffSessionRequest,
+  HandoffSessionResponse,
+  HideProviderHistoryResponse,
+  InboxItem,
+  LoginCommandResponse,
+  LoginToolId,
+  Project,
+  ProjectCheck,
+  ProjectModelsResponse,
+  ProviderHistoryResponse,
+  RefreshModelsResponse,
+  RefreshProjectResponse,
+  ResolveConflictRequestInit,
+  ResolveConflictResponse,
+  RestoreFilesRequest,
+  RestoreFilesResponse,
+  RestoreInboxResponse,
+  ReviewSessionRequest,
+  ReviewSessionResponse,
+  Role,
+  RuntimeResponse,
+  Session,
+  SessionDetail,
+  SessionFileContent,
+  SessionFileList,
+  SessionSnapshot,
+  SessionSnapshotQuery,
+  SessionTranscriptExport,
+  Settings,
+  SettingsPatch,
+  SetupStatus,
+  SlashCommand,
+  Snapshot,
+  SpeechSummaryResponse,
+  StartSessionRequestInit,
+  StartSessionResponse,
+  ToolOutputResponse,
+  TranscriptMessage,
+  TranscriptSearchResponse,
+  UiServerMessage,
+  UpdateProjectRequest,
+  UpdateSessionRequest,
+  UpdateStatus,
+  UserInputInit,
+} from "@agent-rishi/contracts";
+import type { AutomationsApi } from "./automations-api";
+import type { FactoryApi } from "./factory-api";
+import type {
+  AgentConfigApi,
+  BrowserApi,
+  GithubApi,
+  ImagesApi,
+  OrchestrationApi,
+  SecretsApi,
+  VoiceApi,
+} from "./feature-apis";
+import type { AuthApi, NetworkApi } from "./network-api";
+import type { QueueApi } from "./queue-api";
+import type { MentionCandidate, OpenTerminalOptions, TerminalChannel } from "./types";
+import type { UpdatesApi } from "./updates-api";
+
+/** How a message is delivered while a turn is running. */
+export type SendMode = "send" | "queue" | "steer";
+
+/** Messages for one watched session transcript. */
+export type TranscriptWatchMessage =
+  | TranscriptMessage
+  | { type: "transcript_resync"; sessionId: string; seq: number };
+
+/** A transcript search (`GET /api/search/transcripts`): one page, newest matches first. */
+export interface TranscriptSearchRequest {
+  q: string;
+  projectId?: string;
+  /** Only sessions with this role. */
+  role?: Role;
+  /** False leaves out archived sessions (they are included by default). */
+  includeArchived?: boolean;
+  /** The previous page's `nextCursor`. */
+  cursor?: string;
+  /** Most hits (1–100, default 20). */
+  limit?: number;
+}
+
+/** Resolve an inbox item; approvals and questions carry the agent `response`. */
+export interface InboxResolution {
+  status?: "resolved" | "dismissed";
+  response?: RuntimeResponse;
+  note?: string;
+}
+
+/**
+ * Everything the UI asks of the server. Two implementations: `createHttpClient` (fetch +
+ * WebSocket against the real server) and `createMockClient` (rich fixtures, scripted live
+ * events). Screens only ever talk to this interface.
+ */
+export interface AgentRishiClient {
+  readonly kind: "http" | "mock";
+
+  // Realtime (§6): snapshot, then subscribe from its seq.
+  getSnapshot(): Promise<Snapshot>;
+  /**
+   * A session's transcript: the whole session, or with `query.turns` its latest root turns
+   * (`before` pages back, `item` reaches back to an item).
+   */
+  getSessionSnapshot(sessionId: string, query?: SessionSnapshotQuery): Promise<SessionSnapshot>;
+  /**
+   * Subscribe to the live event stream (domain events; the mock also sends agent events).
+   * Calling it again replaces the subscription. Returns an unsubscribe function.
+   */
+  subscribe(fromSeq: number, onMessage: (msg: UiServerMessage) => void): () => void;
+  /** Watch one session's transcript from `fromSeq` (its snapshot seq). Returns unwatch. */
+  watchSession(
+    sessionId: string,
+    fromSeq: number,
+    onMessage: (msg: TranscriptWatchMessage) => void,
+  ): () => void;
+
+  /** Live connection state of the realtime socket. Returns an unsubscribe function. */
+  onConnectionChange(listener: (state: "connecting" | "open" | "closed") => void): () => void;
+
+  // Sessions and turns.
+  getSessionDetail(sessionId: string): Promise<SessionDetail>;
+  /**
+   * These sessions, archived or not (at most `SESSION_LOOKUP_MAX` ids); ids that don't exist
+   * are left out. For the sessions views need that the snapshot no longer carries (§6).
+   */
+  getSessions(sessionIds: readonly string[]): Promise<Session[]>;
+  /**
+   * A page of a project's archived agent sessions, most recently archived first. The snapshot
+   * carries only the recent ones (§6).
+   */
+  listArchivedSessions(
+    projectId: string,
+    query?: ArchivedSessionsQueryInit,
+  ): Promise<ArchivedSessionsPage>;
+  /**
+   * The output the server stored for a tool call, for when the transcript's copy was cut
+   * (`output.truncated`): large outputs are fetched on demand, not pushed (§6).
+   */
+  getToolOutput(sessionId: string, itemId: string): Promise<ToolOutputResponse>;
+  sendMessage(sessionId: string, input: UserInputInit, mode: SendMode): Promise<void>;
+  interrupt(sessionId: string): Promise<void>;
+  /**
+   * "Compact now": the provider compacts the conversation as a turn of its own
+   * (`ProviderCapabilities.compact`). Rejects with 409 while a turn runs or messages wait.
+   */
+  compactSession(sessionId: string): Promise<CompactSessionResponse>;
+  respond(sessionId: string, requestId: string, response: RuntimeResponse): Promise<void>;
+  startSession(input: StartSessionRequestInit): Promise<StartSessionResponse>;
+  stopSession(sessionId: string): Promise<void>;
+  /**
+   * A new session that continues this one's conversation (the provider's fork) in a new
+   * worktree started from its latest checkpoint (§9). The source is left as it is.
+   */
+  forkSession(sessionId: string, req?: ForkSessionRequest): Promise<ForkSessionResponse>;
+  /**
+   * A new session, on any provider, with this one's code as a fork has it and a brief of its
+   * work as its first message instead of the conversation (§9). The source is left as it is.
+   */
+  handoffSession(sessionId: string, req: HandoffSessionRequest): Promise<HandoffSessionResponse>;
+  /**
+   * Review a session's changes (§9): a new read-only session, on the chosen provider, with its
+   * code and a review brief. The source is unchanged.
+   */
+  reviewSession(sessionId: string, req: ReviewSessionRequest): Promise<ReviewSessionResponse>;
+  /**
+   * The session's transcript as Markdown, with a file name, to copy or download and share
+   * outside Agent Rishi (§13). Every thread is included; reasoning, tool output and diffs aren't.
+   */
+  exportSession(sessionId: string): Promise<SessionTranscriptExport>;
+  /** Hide a session and remove its worktree (§9); `force` drops uncommitted changes. */
+  archiveSession(sessionId: string, opts?: { force?: boolean }): Promise<ArchiveSessionResponse>;
+  unarchiveSession(sessionId: string): Promise<Session>;
+  /** Change model, effort or title; model and effort apply from the next turn. */
+  updateSession(sessionId: string, patch: UpdateSessionRequest): Promise<Session>;
+  /** Messages waiting behind a running turn: list, edit, delete, send now. */
+  readonly queue: QueueApi;
+  /** Full-text search over every transcript, archived sessions included (§13). */
+  searchTranscripts(req: TranscriptSearchRequest): Promise<TranscriptSearchResponse>;
+
+  // Conflicts (§8.4): persisted start requests that matched running work.
+  listConflicts(query?: { projectId?: string }): Promise<ConflictRecord[]>;
+  /** The decision, plus `start` to start that request instead of the saved one. */
+  resolveConflict(
+    conflictId: string,
+    request: ResolveConflictRequestInit,
+  ): Promise<ResolveConflictResponse>;
+
+  // Inbox (§11.1).
+  resolveInbox(itemId: string, resolution: InboxResolution): Promise<InboxItem>;
+  /**
+   * Run a failed run's session again on its provider. Rejects with the reason (and fix) when
+   * the provider can't run, or with the new error when it fails again (the item then counts
+   * one more attempt); resolves with the resolved item when it starts.
+   */
+  retryInbox(itemId: string): Promise<InboxItem>;
+  /**
+   * Dismiss several items in one request. Items that wait on the user (`inboxWaitsOnYou`) and
+   * ids that aren't open are skipped; the answer lists the ones dismissed, for Undo.
+   */
+  dismissInbox(itemIds: string[]): Promise<DismissInboxResponse>;
+  /** Undo a bulk dismiss: reopen those of `itemIds` it closed that are still dismissed. */
+  restoreInbox(itemIds: string[]): Promise<RestoreInboxResponse>;
+
+  // Projects, automations (§10), factory.
+  createProject(input: CreateProjectRequest): Promise<CreateProjectResponse>;
+  /** Rename, change defaults, or pin and unpin a project (§13). */
+  updateProject(projectId: string, patch: UpdateProjectRequest): Promise<Project>;
+  /**
+   * Where agent sessions can run (`docs/remote-runners.md` §5), each backend with the reason it
+   * can't be used; with `projectId`, also whether that project may use it.
+   */
+  executionBackends(query?: {
+    projectId?: string;
+    refresh?: boolean;
+  }): Promise<ExecutionBackendsResponse>;
+  /**
+   * Save the manual project order (§13): every non-archived project id, exactly once.
+   * Resolves with the projects in their new order.
+   */
+  reorderProjects(projectIds: string[]): Promise<Project[]>;
+  /**
+   * Detect the project folder's git checkout and GitHub remote again (§9): a folder that gained
+   * a GitHub `origin` becomes a GitHub project. The project change also arrives as an event.
+   */
+  refreshProject(projectId: string): Promise<RefreshProjectResponse>;
+  /** Make a GitHub project local-only, once its folder no longer has a GitHub `origin`. */
+  disconnectGithub(projectId: string): Promise<DisconnectGithubResponse>;
+  /**
+   * Archive a project (§13): it leaves the project list, its automations and factory loop stop,
+   * and the worktrees of its sessions that aren't working are cleaned up. Nothing in the
+   * project's folder changes. Adding the same folder again restores the project. The removal
+   * also arrives as a `project.archived` event. Refused (409 `project_has_active_sessions`)
+   * while a session of the project is working or about to (`ACTIVE_SESSION_STATUSES`).
+   */
+  archiveProject(projectId: string): Promise<void>;
+  readonly automations: AutomationsApi;
+  /** Autonomy modes, the vision, the factory panel and kill switches (§10.1, experimental). */
+  readonly factory: FactoryApi;
+
+  // Settings.
+  updateSettings(patch: SettingsPatch): Promise<Settings>;
+  /** OS keychain secrets (API keys). Values are never echoed back. */
+  readonly secrets: SecretsApi;
+  /** Network access (§15.1): on/off, the password, signed-in devices. */
+  readonly network: NetworkApi;
+  /** Sign-in for remote devices (§15.1). */
+  readonly auth: AuthApi;
+
+  // First-run setup (§14).
+  /** Detection results; `refresh` re-runs every check instead of using the cache. */
+  getSetupStatus(opts?: { refresh?: boolean }): Promise<SetupStatus>;
+  /** The npm registry version check and self-update state (`settings.updates.mode`). */
+  getUpdates(opts?: { refresh?: boolean }): Promise<UpdateStatus>;
+  /** One-click self-update: install, restart, roll back, release notes (§16). */
+  readonly updates: UpdatesApi;
+  loginCommand(tool: LoginToolId): Promise<LoginCommandResponse>;
+  /** Ask a provider for its models again (a model was released, the CLI was updated). */
+  refreshModels(providerId: string): Promise<RefreshModelsResponse>;
+  /**
+   * A provider's models for one project (`capabilities.projectModels`: with the project's own
+   * config); `refresh` asks the provider again.
+   */
+  projectModels(
+    providerId: string,
+    projectId: string,
+    opts?: { refresh?: boolean },
+  ): Promise<ProjectModelsResponse>;
+  /**
+   * The conversations Agent Rishi started that a provider's own apps still list as the user's
+   * history (`capabilities.vendorHistory`). Changes nothing.
+   */
+  getProviderHistory(providerId: string): Promise<ProviderHistoryResponse>;
+  /** Hide those conversations (archived, not deleted), after the user confirmed the list. */
+  hideProviderHistory(providerId: string): Promise<HideProviderHistoryResponse>;
+  /** Claude Code support: the Claude Agent SDK, installed on demand into `<home>/deps`. */
+  getClaudeSdkStatus(): Promise<ClaudeSdkStatus>;
+  /** Start (or join) the Claude Code support install; poll `getClaudeSdkStatus` for progress. */
+  installClaudeSdk(): Promise<ClaudeSdkStatus>;
+  completeSetup(): Promise<void>;
+  listDirectory(path: string | null, opts?: { showHidden?: boolean }): Promise<FsListResponse>;
+
+  // Workbench (§12).
+  getDiff(sessionId: string, scope: DiffScope): Promise<DiffResult>;
+  restoreFiles(sessionId: string, req: RestoreFilesRequest): Promise<RestoreFilesResponse>;
+  gitStatus(sessionId: string): Promise<GitStatusResponse>;
+  gitCommit(sessionId: string, req: GitCommitRequest): Promise<GitCommitResponse>;
+  gitPush(sessionId: string, req: GitPushRequest): Promise<GitPushResponse>;
+  listFiles(sessionId: string): Promise<SessionFileList>;
+  readFile(sessionId: string, path: string): Promise<SessionFileContent>;
+  searchMentions(sessionId: string, query: string): Promise<MentionCandidate[]>;
+  /** The session's `/` commands and skills for the composer, sorted by name. */
+  listSlashCommands(sessionId: string): Promise<SlashCommand[]>;
+  /** `@` mention candidates from the project folder, for the New session draft. */
+  searchProjectMentions(projectId: string, query: string): Promise<MentionCandidate[]>;
+  /** The `/` commands and skills `provider` would load in the project (the New session draft). */
+  listProjectSlashCommands(projectId: string, provider: string): Promise<SlashCommand[]>;
+  /** The project's checks a new session would freeze (§9 Project checks), for the draft. */
+  listProjectChecks(projectId: string): Promise<ProjectCheck[]>;
+  openTerminal(opts: OpenTerminalOptions): TerminalChannel;
+  /** The session browser: live viewer socket, tabs, navigation, dev servers (§12.2). */
+  readonly browser: BrowserApi;
+  /** URL for an artifact's bytes (screenshots, generated images, attachments). */
+  artifactUrl(artifactId: string): string;
+  /**
+   * "Load image" on a remote image in Markdown (#341): an address on the server that fetches
+   * exactly `url`, once. Ask again for each click; never build it from a URL in the page.
+   */
+  remoteImageUrl(url: string): Promise<string>;
+  /** Compress a final message for read-aloud with the utility model (§11.3). */
+  speechSummary(text: string): Promise<SpeechSummaryResponse>;
+
+  // Agent configuration (§12.4), image generation (§12.5), cloud voice (§11.3).
+  readonly agentConfig: AgentConfigApi;
+  readonly images: ImagesApi;
+  readonly voice: VoiceApi;
+
+  // Orchestration (§8) and GitHub (§9).
+  readonly orchestration: OrchestrationApi;
+  readonly github: GithubApi;
+}

@@ -1,0 +1,1 @@
+ALTER TABLE `projects` ADD `execution_backend` text DEFAULT 'local' NOT NULL;

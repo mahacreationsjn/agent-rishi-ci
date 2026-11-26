@@ -1,0 +1,166 @@
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { ownNodeEnv } from "@agent-rishi/providers";
+import { type Browser, chromium } from "playwright-core";
+import { CommandError } from "../errors";
+import { VIEWPORT_LIMITS } from "./viewport";
+
+/** Installed Chromium-family browsers playwright-core can drive by `channel`. */
+export type BrowserChannel = "msedge" | "chrome";
+
+export interface LaunchOptions {
+  /** Channels to try, in order. Default: Edge then Chrome on Windows, Chrome then Edge elsewhere. */
+  channels?: BrowserChannel[];
+  /** Use this Chromium executable instead of an installed channel. */
+  executablePath?: string;
+  /**
+   * Fall back to Playwright's own Chromium when no installed Edge/Chrome launches, and
+   * download it if missing. Only set this with the user's consent (§12.2).
+   */
+  allowDownloadedChromium?: boolean;
+  /** Default true. */
+  headless?: boolean;
+  log?: (message: string) => void;
+}
+
+export interface LaunchedBrowser {
+  browser: Browser;
+  /** `msedge`, `chrome`, `executable` or `chromium` (downloaded). */
+  channel: string;
+  /** Browser process id (for process-tree cleanup); null if it could not be determined. */
+  pid: number | null;
+}
+
+const isWindows = process.platform === "win32";
+
+/** Default channel order for this platform. */
+export function defaultChannels(): BrowserChannel[] {
+  return isWindows ? ["msedge", "chrome"] : ["chrome", "msedge"];
+}
+
+function knownPaths(channel: BrowserChannel): string[] {
+  if (isWindows) {
+    const roots = [
+      process.env["PROGRAMFILES(X86)"],
+      process.env.PROGRAMFILES,
+      process.env.LOCALAPPDATA,
+    ].filter((r): r is string => Boolean(r));
+    const rel =
+      channel === "msedge"
+        ? join("Microsoft", "Edge", "Application", "msedge.exe")
+        : join("Google", "Chrome", "Application", "chrome.exe");
+    return roots.map((root) => join(root, rel));
+  }
+  if (process.platform === "darwin") {
+    return channel === "msedge"
+      ? ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
+      : ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"];
+  }
+  return channel === "msedge"
+    ? ["/opt/microsoft/msedge/msedge", "/usr/bin/microsoft-edge"]
+    : ["/opt/google/chrome/chrome", "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"];
+}
+
+/** Installed channels found at their standard locations (cheap, synchronous). */
+export function findInstalledChannels(): BrowserChannel[] {
+  return defaultChannels().filter((channel) => knownPaths(channel).some((p) => existsSync(p)));
+}
+
+async function browserPid(browser: Browser): Promise<number | null> {
+  try {
+    const cdp = await browser.newBrowserCDPSession();
+    const info = (await cdp.send("SystemInfo.getProcessInfo")) as {
+      processInfo: { type: string; id: number }[];
+    };
+    await cdp.detach().catch(() => undefined);
+    return info.processInfo.find((p) => p.type === "browser")?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+type Target = { channel?: BrowserChannel; executablePath?: string; label: string };
+
+/**
+ * Arguments for the runner's Chromium. Deliberately no `--remote-debugging-port`: this one
+ * browser holds every session's context, and anyone who can reach loopback (another session's
+ * agent, another OS user, a container) could attach to a CDP port and read or drive all of them
+ * (§12.2, §15). Playwright drives the browser over its own `--remote-debugging-pipe`, which only
+ * this process holds, so keep Playwright's default arguments (never `ignoreDefaultArgs`).
+ */
+const CHROMIUM_ARGS = [
+  "--no-first-run",
+  "--no-default-browser-check",
+  // Screencast frames are captured at the browser's real scale, not the emulated one, so
+  // render at the highest scale we emulate; frames are scaled down to each viewport's
+  // device pixels (see viewport.ts).
+  `--force-device-scale-factor=${VIEWPORT_LIMITS.maxDeviceScaleFactor}`,
+];
+
+async function launchTarget(target: Target, headless: boolean): Promise<LaunchedBrowser> {
+  const browser = await chromium.launch({
+    ...(target.channel ? { channel: target.channel } : {}),
+    ...(target.executablePath ? { executablePath: target.executablePath } : {}),
+    headless,
+    handleSIGINT: false,
+    handleSIGTERM: false,
+    handleSIGHUP: false,
+    args: [...CHROMIUM_ARGS],
+  });
+  return { browser, channel: target.label, pid: await browserPid(browser) };
+}
+
+/** Download Playwright's Chromium build with the bundled playwright-core CLI. */
+export function installChromium(log?: (message: string) => void): Promise<void> {
+  const require = createRequire(import.meta.url);
+  const cli = join(dirname(require.resolve("playwright-core/package.json")), "cli.js");
+  log?.("downloading Chromium (consented fallback)");
+  return new Promise((resolve, reject) => {
+    execFile(
+      process.execPath,
+      [cli, "install", "chromium"],
+      { windowsHide: true, timeout: 10 * 60_000, env: ownNodeEnv() },
+      (error) => (error ? reject(error) : resolve()),
+    );
+  });
+}
+
+/**
+ * Launch one Chromium for the runner (§12.2): the installed Edge or Chrome first, then
+ * (only when allowed) Playwright's downloaded Chromium. It is driven over a pipe only and opens
+ * no TCP debugging port (see `CHROMIUM_ARGS`).
+ */
+export async function launchChromium(opts: LaunchOptions = {}): Promise<LaunchedBrowser> {
+  const headless = opts.headless ?? true;
+  const failures: string[] = [];
+  const targets: Target[] = opts.executablePath
+    ? [{ executablePath: opts.executablePath, label: "executable" }]
+    : (opts.channels ?? defaultChannels()).map((channel) => ({ channel, label: channel }));
+
+  for (const target of targets) {
+    try {
+      const launched = await launchTarget(target, headless);
+      opts.log?.(`browser: launched ${launched.channel} (pid ${launched.pid})`);
+      return launched;
+    } catch (error) {
+      failures.push(`${target.label}: ${firstLine(error)}`);
+    }
+  }
+
+  if (opts.allowDownloadedChromium) {
+    if (!existsSync(chromium.executablePath())) await installChromium(opts.log);
+    return launchTarget({ label: "chromium" }, headless);
+  }
+  throw new CommandError(
+    "browser_unavailable",
+    `No installed Edge or Chrome could be launched (${failures.join("; ")}). ` +
+      "Install Microsoft Edge or Google Chrome, or allow downloading Chromium.",
+  );
+}
+
+function firstLine(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.split("\n")[0] ?? text;
+}
