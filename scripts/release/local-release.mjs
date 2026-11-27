@@ -22,7 +22,7 @@
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BUMPS, bumpRepository, nextVersion, today } from "./bump-version.mjs";
@@ -88,6 +88,15 @@ export function releaseArtifacts(files, version) {
     `^(Agent Rishi-Setup-${v}\\.exe|Agent Rishi-${v}-[\\w]+\\.(dmg|zip|AppImage)|agent_rishi_${v}_[\\w]+\\.deb)(\\.blockmap)?$`,
   );
   return files.filter((f) => installer.test(f) || /^latest(-[\w]+)?\.yml$/.test(f)).sort();
+}
+
+/**
+ * The name a release file is uploaded under. GitHub turns spaces in asset names into dots, but
+ * the updater's `latest*.yml` names the installer with dashes (`Agent-Rishi-Setup-X.Y.Z.exe`),
+ * so files are renamed to that before upload and the two agree.
+ */
+export function assetName(file) {
+  return file.replaceAll(" ", "-");
 }
 
 /** `SHA256SUMS` text for `files` in `dir`, in the `sha256sum` format. */
@@ -174,7 +183,11 @@ function buildInstallers(version) {
   run("node", ["scripts/package.mjs", "--publish", "never"], {
     cwd: join(ROOT, "apps", "desktop"),
   });
-  const files = releaseArtifacts(readdirSync(RELEASE_DIR), version);
+  const files = releaseArtifacts(readdirSync(RELEASE_DIR), version).map((f) => {
+    const name = assetName(f);
+    if (name !== f) renameSync(join(RELEASE_DIR, f), join(RELEASE_DIR, name));
+    return name;
+  });
   if (!files.some((f) => !f.endsWith(".yml") && !f.endsWith(".blockmap"))) {
     throw new Error(`no installer for ${version} in ${RELEASE_DIR}`);
   }
