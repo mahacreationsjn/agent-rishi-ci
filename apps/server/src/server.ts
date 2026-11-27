@@ -1,4 +1,4 @@
-import { rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import {
   AGENT_RISHI_VERSION,
   HOME_RUNNER_ID,
@@ -11,6 +11,13 @@ import { Hono } from "hono";
 import { WebSocketServer } from "ws";
 import { contentSecurityPolicy } from "./content-security";
 import { type Database, openDatabase } from "./db/client";
+import {
+  backupDatabase,
+  DB_BACKUP_CHECK_MS,
+  dbBackupDir,
+  dbBackupDue,
+  prepareDatabase,
+} from "./db/safety";
 import { EventStore } from "./events/store";
 import type { ExecutionBackend } from "./execution/backend";
 import { DockerBackend } from "./execution/docker/backend";
@@ -186,6 +193,15 @@ export interface RunningServer {
 export async function startServer(opts: StartServerOptions): Promise<RunningServer> {
   const log = opts.log ?? (() => {});
   const paths = ensureHome(opts.dataDir);
+  // The lock is removed on a clean stop, so finding one means the last run ended unexpectedly.
+  const backups = dbBackupDir(paths.home);
+  await prepareDatabase({
+    file: paths.db,
+    backupDir: backups,
+    version: AGENT_RISHI_VERSION,
+    uncleanShutdown: existsSync(paths.serverLock),
+    log,
+  });
   const database = openDatabase(paths.db, opts.migrationsDir);
   const store = new EventStore(database.db);
   const settings = new SettingsStore(paths.settings);
@@ -397,6 +413,20 @@ export async function startServer(opts: StartServerOptions): Promise<RunningServ
   // Index transcript items the search index hasn't seen yet, a batch at a time (§6).
   const searchBackfill = new SearchBackfill(database.db, { log });
   searchBackfill.start();
+  // A verified backup of the database once a day while the server runs (F1).
+  let backingUp: Promise<void> | undefined;
+  const backupTimer = setInterval(() => {
+    if (backingUp || !dbBackupDue(backups)) return;
+    backingUp = backupDatabase(database.client, backups, AGENT_RISHI_VERSION)
+      .then(
+        (taken) => log(`database: backed up (${taken.name})`),
+        (error: unknown) => log(`database: backup failed: ${String(error)}`),
+      )
+      .finally(() => {
+        backingUp = undefined;
+      });
+  }, DB_BACKUP_CHECK_MS);
+  backupTimer.unref();
   if (network.enabled) {
     log(
       `network access on: ${network
@@ -466,6 +496,8 @@ export async function startServer(opts: StartServerOptions): Promise<RunningServ
       wss.close();
       await listener.close();
       if ("closeAllConnections" in httpServer) httpServer.closeAllConnections();
+      clearInterval(backupTimer);
+      await backingUp;
       database.close();
       rmSync(paths.serverLock, { force: true });
     })();

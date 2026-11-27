@@ -4,6 +4,8 @@
  *   agent-rishi doctor [--install]
  *   agent-rishi update [--rollback]
  *   agent-rishi stop
+ *   agent-rishi backup
+ *   agent-rishi restore [<name>]
  *   agent-rishi password [--generate]
  *   agent-rishi network [on [--loopback-only]|off]
  *   agent-rishi network origin add|remove|list [<https-url>]

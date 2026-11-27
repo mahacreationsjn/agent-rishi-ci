@@ -10,8 +10,10 @@ import {
 } from "@agent-rishi/providers";
 import {
   checkSetup,
+  dbBackupDir,
   homePaths,
   installProblem,
+  listDbBackups,
   listInstalled,
   packageRoot,
   readLiveRunnerLock,
@@ -61,6 +63,25 @@ async function claudeSupport(depsDir: string): Promise<[string, string]> {
   }
 }
 
+/** A backup older than this is reported as a warning. */
+const STALE_BACKUP_MS = 3 * 24 * 60 * 60 * 1000;
+
+/** The database backups: how many, and how recent the newest is. */
+function backupRow(home: string): [string, string, string] {
+  if (!existsSync(homePaths(home).db)) return ["--", "Database backups", "no database yet"];
+  const backups = listDbBackups(dbBackupDir(home));
+  const newest = backups[0];
+  if (!newest) {
+    return ["!!", "Database backups", "none yet: run `agent-rishi backup`, or start Agent Rishi"];
+  }
+  const stale = Date.now() - newest.takenAt.getTime() > STALE_BACKUP_MS;
+  return [
+    stale ? "!!" : "ok",
+    "Database backups",
+    `${backups.length}, newest ${newest.takenAt.toISOString()} (agent-rishi restore lists them)`,
+  ];
+}
+
 /** `agent-rishi doctor --install`: install Claude Code support now, printing npm's progress. */
 async function installClaudeSupport(depsDir: string): Promise<boolean> {
   if (claudeSdkSource() === "workspace" || isClaudeSdkInstalled(depsDir)) return true;
@@ -99,6 +120,7 @@ export async function doctor(
     ["ok", "Agent Rishi", AGENT_RISHI_VERSION],
     ...versionRows(home, opts.launch),
     [existsSync(home) ? "ok" : "--", "Data directory", home],
+    backupRow(home),
     [
       server ? "ok" : "--",
       "Server",

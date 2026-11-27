@@ -39,6 +39,7 @@ To fix:
 | Running server | `~/.agent-rishi/server.json` (port and pid) |
 | Running runner | `~/.agent-rishi/runner/runner.json` (port, pid and version) |
 | Database | `~/.agent-rishi/agent-rishi.db` (SQLite, WAL mode) |
+| Database backups | `~/.agent-rishi/backups/db/` (see [The database is damaged](#the-database-is-damaged-or-you-want-an-earlier-copy)) |
 | Config-file backups | `~/.agent-rishi/backups/` |
 | Claude Code support (Claude Agent SDK) | `~/.agent-rishi/deps/` |
 
@@ -254,6 +255,26 @@ Agent Rishi is tested on Windows first. Things worth knowing:
 - **Long paths.** Worktrees live under short paths (`~/.agent-rishi/wt/<project>/<session>/`) to stay clear of the 260-character limit, but very deep repositories can still hit it. Enable long paths in git with `git config --global core.longpaths true`.
 - **Keychain.** API keys are stored in **Windows Credential Manager** under the service name `agent-rishi`. If the keychain module can't load, Agent Rishi keeps keys in memory until it stops (start with `AGENT_RISHI_DEBUG=1` to see why).
 - **Files in use.** Antivirus scanners and editors with the worktree open can briefly lock files; if removing a session's worktree fails, close what has it open and try again. Programs Agent Rishi's agents started there (a dev server run through the agent's shell) are ended before the removal, and when the session stops; your own editors and terminals are left alone. A removal that still fails shows up in the inbox under **Worktrees not removed**, with **Try again**.
+
+## The database is damaged, or you want an earlier copy
+
+Agent Rishi keeps verified backups of its database in `~/.agent-rishi/backups/db/`, the newest seven:
+
+- one before a new version first starts, ahead of its database updates;
+- one a day while it runs;
+- one whenever you run `agent-rishi backup`.
+
+Each copy is checked before it is kept. `agent-rishi doctor` shows how many there are and how recent the newest is.
+
+If Agent Rishi stopped unexpectedly (a crash, a power cut, the computer restarting), it checks the database the next time it starts. When the database is damaged it doesn't start on it and changes nothing; the message names the newest backup. To restore one:
+
+```sh
+agent-rishi stop
+agent-rishi restore                 # list the backups, newest first
+agent-rishi restore <name>          # put that backup in place
+```
+
+The database it replaces is kept next to it as `agent-rishi.db.before-restore-<time>`, never deleted. Restoring loses what happened after the backup was taken. Your repositories, worktrees and branches are not part of the database and are not touched.
 
 ## Starting fresh
 

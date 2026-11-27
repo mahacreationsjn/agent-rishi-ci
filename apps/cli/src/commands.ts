@@ -1,6 +1,6 @@
 /**
  * The commands that run on the server code: start Agent Rishi (the default), `doctor`, `update`,
- * `stop`, `password` and `network`. `main.ts` loads this module only for them, so
+ * `stop`, `backup`, `restore`, `password` and `network`. `main.ts` loads this module only for them, so
  * `runner-link` never loads the server.
  */
 import { join } from "node:path";
@@ -13,6 +13,7 @@ import {
   startServer,
 } from "@agent-rishi/server";
 import { DEFAULT_PORT, HELP, type ParsedCli } from "./args";
+import { backupCommand, restoreCommand } from "./backup-command";
 import { doctor } from "./doctor";
 import type { LaunchInfo } from "./launcher";
 import { networkCommand, passwordCommand } from "./network-command";
@@ -48,6 +49,8 @@ export async function runCommand(args: string[], parsed: ParsedCli): Promise<num
   const command = positionals[0];
   if (command === "doctor") return doctor(home, { install: values.install, launch });
   if (command === "stop") return stop(home);
+  if (command === "backup") return backupCommand(home);
+  if (command === "restore") return restoreCommand(home, positionals[1]);
   if (command === "update") return updateCommand(home, { rollback: values.rollback, launch });
   if (command === "password") return passwordCommand(home, { generate: values.generate });
   if (command === "network")
