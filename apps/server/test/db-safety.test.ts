@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { DATABASE_DAMAGED } from "@agent-rishi/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   backupDatabase,
@@ -19,6 +20,7 @@ import {
   listDbBackups,
   prepareDatabase,
   restoreDatabase,
+  restoreNewestBackup,
 } from "../src/db/safety";
 
 let home: string;
@@ -154,6 +156,41 @@ describe("prepareDatabase (server start)", () => {
     // Nothing was changed: the damaged file is still there, and no new backup was taken.
     expect(statSync(dbFile).size).toBeGreaterThan(0);
     expect(listDbBackups(dir)).toHaveLength(1);
+  });
+});
+
+describe("restoreNewestBackup (the desktop app's Restore button)", () => {
+  it("restores the newest backup that passes its check", async () => {
+    makeDb(dbFile, 3);
+    await backupDatabase(dbFile, dir, "0.8.0", { now: at("2026-11-26T10:00:00.000Z") });
+    makeDb(dbFile, 2);
+    const newest = await backupDatabase(dbFile, dir, "0.8.0", {
+      now: at("2026-11-27T10:00:00.000Z"),
+    });
+    zeroFill(newest.file);
+    zeroFill(dbFile);
+    const { restored } = restoreNewestBackup(dbFile, dir);
+    expect(restored.takenAt.toISOString()).toBe("2026-11-26T10:00:00.000Z");
+    expect(countRows(dbFile)).toBe(3);
+  });
+
+  it("throws when there is no usable backup, changing nothing", () => {
+    makeDb(dbFile, 1);
+    expect(() => restoreNewestBackup(dbFile, dir)).toThrow(/no usable database backup/);
+    expect(countRows(dbFile)).toBe(1);
+  });
+
+  it("marks a refused start so the desktop app can offer it", async () => {
+    makeDb(dbFile, 1);
+    await backupDatabase(dbFile, dir, "0.8.0");
+    zeroFill(dbFile);
+    const error = await prepareDatabase({
+      file: dbFile,
+      backupDir: dir,
+      version: "0.8.0",
+      uncleanShutdown: true,
+    }).catch((e: unknown) => e);
+    expect((error as DatabaseDamagedError).code).toBe(DATABASE_DAMAGED);
   });
 });
 

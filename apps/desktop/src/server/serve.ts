@@ -3,7 +3,14 @@ import {
   DesktopHostMessage,
   type DesktopServerMessage,
 } from "@agent-rishi/contracts";
-import { ensureHome, ensureInstallToken, resolveHome, startServer } from "@agent-rishi/server";
+import {
+  dbBackupDir,
+  ensureHome,
+  ensureInstallToken,
+  resolveHome,
+  restoreNewestBackup,
+  startServer,
+} from "@agent-rishi/server";
 import { serverLog } from "./log";
 import { IpcDesktopUpdater } from "./update-bridge";
 
@@ -15,10 +22,22 @@ const ORPHAN_CLOSE_MS = 30_000;
  * mirror the updater, and close on `shutdown` (with the runner when asked, as `agent-rishi stop`
  * does) or when the main process goes away (the runner keeps running).
  */
-export async function serve(opts: { home?: string; port: number; fake: boolean }): Promise<void> {
+export async function serve(opts: {
+  home?: string;
+  port: number;
+  fake: boolean;
+  /** Put the newest database backup in place first (the app's Restore button). */
+  restoreNewestBackup?: boolean;
+}): Promise<void> {
   const send = (message: DesktopServerMessage) => process.send?.(message);
   const home = resolveHome(opts.home);
   const paths = ensureHome(home);
+  if (opts.restoreNewestBackup) {
+    const { restored, setAside } = restoreNewestBackup(paths.db, dbBackupDir(home));
+    console.log(
+      `server: restored the database from ${restored.name}${setAside ? `; the replaced one is kept as ${setAside}` : ""}`,
+    );
+  }
   const token = ensureInstallToken(paths.token);
   const desktop = new IpcDesktopUpdater(send, AGENT_RISHI_VERSION);
   let closing = false;

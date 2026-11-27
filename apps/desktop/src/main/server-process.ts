@@ -56,6 +56,8 @@ export interface ServerProcessOptions {
   logFile: string;
   /** The server asks the updater to do something; answer with `send({ type: "update.done" })`. */
   onUpdateCommand: (id: string, command: DesktopUpdateCommand) => void;
+  /** Put the newest database backup in place before starting (the Restore button). */
+  restoreNewestBackup?: boolean;
   /** How long the child can take to report readiness. Defaults to 60 seconds. */
   startupTimeoutMs?: number;
   onExit?: (exit: ServerExit) => void;
@@ -88,6 +90,7 @@ export class ServerProcess {
     const out = openSync(this.opts.logFile, "a");
     const args = ["--home", this.opts.home, "--port", String(this.opts.port)];
     if (this.opts.fake) args.push("--fake");
+    if (this.opts.restoreNewestBackup) args.push("--restore-newest-backup");
     let child: ChildProcess;
     try {
       child = fork(this.opts.entry, args, {
