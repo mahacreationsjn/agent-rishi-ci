@@ -10,6 +10,7 @@ export interface MenuActions {
   exportDiagnostics: () => void;
   retryLoading: () => void;
   quit: () => void;
+  quitAndStopAgents: () => void;
   zoom: (command: ZoomCommand) => void;
 }
 
@@ -62,6 +63,11 @@ export function appMenuTemplate(
     accelerator: mac ? "Cmd+Q" : "Ctrl+Q",
     click: actions.quit,
   };
+  // Quit leaves the runner (and its agents) running; this one stops it too, after confirming.
+  const quitAndStop: MenuItemConstructorOptions = {
+    label: "Quit and Stop Agents...",
+    click: actions.quitAndStopAgents,
+  };
   const template: MenuItemConstructorOptions[] = [];
   if (mac) {
     template.push({
@@ -79,6 +85,7 @@ export function appMenuTemplate(
         { role: "unhide" },
         { type: "separator" },
         quit,
+        quitAndStop,
       ],
     });
   }
@@ -88,7 +95,7 @@ export function appMenuTemplate(
       { label: "Inbox", click: actions.openInbox },
       ...(mac ? [] : [{ type: "separator" } as const, settings]),
       { type: "separator" },
-      mac ? { role: "close" } : quit,
+      ...(mac ? [{ role: "close" } as const] : [quit, quitAndStop]),
     ],
   });
   template.push({ role: "editMenu" });
