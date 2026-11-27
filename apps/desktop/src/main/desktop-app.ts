@@ -38,6 +38,8 @@ import { windowShot } from "./window-shot";
 const DOCS_URL = "https://github.com/sventkrtl/agent-rishi/blob/main/docs/desktop.md";
 /** Longest a quit may take (browser hand-off 15 s + server stop up to 30 s) before it's forced. */
 const QUIT_LIMIT_MS = 45_000;
+/** How long "Quit and Stop Agents" gives the server to drain the runner (an update allows 90 s). */
+const STOP_RUNNER_MS = 60_000;
 
 type QuitInitiator =
   | "menu"
@@ -70,6 +72,8 @@ export class DesktopApp {
   private loaded = false;
   private quitting = false;
   private quitInitiator: QuitInitiator = "system";
+  /** Set by "Quit and Stop Agents": quitting stops the runner too. */
+  private stopRunnerOnQuit = false;
   private readonly diagnostics: Diagnostics;
   private uiLoad: Connection | undefined;
   private connecting = false;
@@ -132,6 +136,7 @@ export class DesktopApp {
         openInbox: () => this.navigate("/inbox"),
         update: (command) => void this.runUpdate(command),
         quit: () => this.quit("tray"),
+        quitAndStopAgents: () => void this.quitAndStopAgents(),
       },
     );
     this.window = new MainWindow({
@@ -270,6 +275,38 @@ export class DesktopApp {
     app.quit();
   }
 
+  /**
+   * Quit and stop the runner too, after a confirmation: plain Quit leaves the runner (and its
+   * agents) running, and until now only `agent-rishi stop` in a terminal stopped it. Only a server
+   * this app started can be asked to stop the runner; one started elsewhere is left alone.
+   */
+  private async quitAndStopAgents(): Promise<void> {
+    if (this.quitting) return;
+    if (!this.conn?.server) {
+      await dialog.showMessageBox({
+        type: "info",
+        title: "Agent Rishi",
+        message: "The agents run in an Agent Rishi server this app didn't start.",
+        detail: "Stop it with `agent-rishi stop` in a terminal.",
+        buttons: ["OK"],
+      });
+      return;
+    }
+    const { response } = await dialog.showMessageBox({
+      type: "warning",
+      title: "Agent Rishi",
+      message: "Stop the agents and quit?",
+      detail:
+        "Agent Rishi stops the runner gracefully, as `agent-rishi stop` does, so running agents and automations stop too. Sessions resume where they left off the next time you open Agent Rishi.",
+      buttons: ["Stop Agents and Quit", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+    });
+    if (response !== 0 || this.quitting) return;
+    this.stopRunnerOnQuit = true;
+    this.quit("tray");
+  }
+
   startupFailed(): void {
     this.log("app: quit initiated by startup failure");
     this.diagnostics.record({ kind: "quit", reason: "startup" });
@@ -311,15 +348,19 @@ export class DesktopApp {
     event.preventDefault();
     if (this.quitting) return;
     this.quitting = true;
-    this.log(`app: quit initiated by ${this.quitInitiator}`);
+    this.log(
+      `app: quit initiated by ${this.quitInitiator}${this.stopRunnerOnQuit ? " (stopping the agents too)" : ""}`,
+    );
     this.diagnostics.record({ kind: "quit", reason: this.quitInitiator });
     // Every step below is bounded, but quitting must finish even if one isn't: a timer here,
     // and a separate process for when the main thread itself is stuck in native shutdown.
+    // Stopping the runner may take its full drain time on top.
+    const limit = QUIT_LIMIT_MS + (this.stopRunnerOnQuit ? STOP_RUNNER_MS + 15_000 : 0);
     const watchdog = setTimeout(() => {
-      this.log(`app: still quitting after ${QUIT_LIMIT_MS / 1000} s; exiting now`);
+      this.log(`app: still quitting after ${limit / 1000} s; exiting now`);
       forceExit(0);
-    }, QUIT_LIMIT_MS);
-    const hardStop = armQuitWatchdog(QUIT_LIMIT_MS + 5_000, this.log);
+    }, limit);
+    const hardStop = armQuitWatchdog(limit + 5_000, this.log);
     void (async () => {
       try {
         this.window?.allowClose();
@@ -335,7 +376,13 @@ export class DesktopApp {
           await this.updates.installOnQuit();
           return;
         }
-        await this.conn?.server?.stop({ stopRunner: false });
+        if (this.stopRunnerOnQuit && this.conn?.server) {
+          // As `agent-rishi stop`: the runner drains and exits, within the raised limit below.
+          await this.conn.server.stop({ stopRunner: true, timeoutMs: STOP_RUNNER_MS });
+          await waitForRunnerExit(homeFiles(this.args.home).runnerLock, 15_000, this.log);
+        } else {
+          await this.conn?.server?.stop({ stopRunner: false });
+        }
         this.tray?.destroy();
       } catch (error) {
         // A failed step must not leave the app unable to quit.
@@ -483,6 +530,7 @@ export class DesktopApp {
         void this.retryLoading().catch(() => this.log("app: could not retry loading the UI"));
       },
       quit: () => this.quit("menu"),
+      quitAndStopAgents: () => void this.quitAndStopAgents(),
       zoom: (command) => {
         this.window?.zoom(command);
         this.browser?.browsers.layout();

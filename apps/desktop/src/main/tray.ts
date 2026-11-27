@@ -6,6 +6,8 @@ export interface TrayActions {
   openInbox: () => void;
   update: (command: "download" | "install") => void;
   quit: () => void;
+  /** Quit and stop the runner too (as `agent-rishi stop`), after the user confirms. */
+  quitAndStopAgents: () => void;
 }
 
 /**
@@ -69,6 +71,8 @@ export class AppTray {
     }
     items.push({ type: "separator" });
     items.push({ label: "Quit Agent Rishi", click: () => this.actions.quit() });
+    // Quit leaves the runner (and its agents) running; this is the in-app `agent-rishi stop`.
+    items.push({ label: "Quit and Stop Agents...", click: () => this.actions.quitAndStopAgents() });
     return items;
   }
 }

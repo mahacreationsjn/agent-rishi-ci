@@ -208,6 +208,7 @@ describe("app menu", () => {
     exportDiagnostics: noop,
     retryLoading: noop,
     quit: noop,
+    quitAndStopAgents: noop,
     zoom: noop,
   };
 
@@ -217,6 +218,17 @@ describe("app menu", () => {
       expect(menu.some((m) => m.role === "editMenu")).toBe(true);
       expect(menu.some((m) => m.role === "windowMenu")).toBe(true);
       expect(menu.some((m) => m.label === "View")).toBe(true);
+    }
+  });
+
+  it("offers Quit and Stop Agents right after Quit on every OS", () => {
+    for (const platform of ["win32", "darwin", "linux"] as const) {
+      const items = appMenuTemplate(platform, actions).flatMap((m) =>
+        Array.isArray(m.submenu) ? m.submenu.map((i) => i.label ?? i.role ?? "") : [],
+      );
+      const quit = items.indexOf(platform === "darwin" ? "Quit Agent Rishi" : "Quit");
+      expect(quit).toBeGreaterThanOrEqual(0);
+      expect(items[quit + 1]).toBe("Quit and Stop Agents...");
     }
   });
 

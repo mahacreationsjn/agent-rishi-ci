@@ -143,6 +143,7 @@ describe("zoom menu items", () => {
     exportDiagnostics: () => {},
     retryLoading: () => {},
     quit: () => {},
+    quitAndStopAgents: () => {},
     zoom: (command: ZoomCommand) => calls.push(command),
   });
   const viewItems = (platform: NodeJS.Platform, calls: ZoomCommand[] = []) => {
