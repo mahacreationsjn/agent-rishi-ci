@@ -92,6 +92,8 @@ jobs:
           mkdir "$RUNNER_TEMP/install-check" && cd "$RUNNER_TEMP/install-check"
           npm init -y > /dev/null
           npm install "$RUNNER_TEMP"/agent-rishi-*.tgz
+          # A local install puts the `agent-rishi` command in node_modules/.bin, which isn't on PATH.
+          export PATH="$PWD/node_modules/.bin:$PATH"
           # Pure-JS deps are bundled; only native modules and playwright-core are installed.
           du -sh node_modules
           ls node_modules
