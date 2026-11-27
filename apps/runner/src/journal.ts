@@ -1,14 +1,8 @@
 import { randomUUID } from "node:crypto";
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type RunnerEvent, RunnerEventMessage } from "@agent-rishi/contracts";
+import { writeFileDurably } from "@agent-rishi/providers";
 
 interface JournalState {
   runnerId: string;
@@ -198,9 +192,8 @@ export class Journal {
   /** Rewrite the file without its acked events. Callers write the state first. */
   private compact(): void {
     const live = this.entries.slice(this.head);
-    const tmp = `${this.file}.tmp`;
-    writeFileSync(tmp, live.map((e) => `${JSON.stringify(e.msg)}\n`).join(""));
-    renameSync(tmp, this.file);
+    // Durable: a power cut during compaction must not leave an empty journal behind.
+    writeFileDurably(this.file, live.map((e) => `${JSON.stringify(e.msg)}\n`).join(""));
     this.entries = live;
     this.head = 0;
     this.fileBytes -= this.ackedBytes;
@@ -208,9 +201,7 @@ export class Journal {
   }
 
   private writeState(state: JournalState): void {
-    const tmp = `${this.stateFile}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`);
-    renameSync(tmp, this.stateFile);
+    writeFileDurably(this.stateFile, `${JSON.stringify(state, null, 2)}\n`);
   }
 
   private loadState(): JournalState {

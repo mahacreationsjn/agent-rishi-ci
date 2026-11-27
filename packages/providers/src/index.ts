@@ -29,6 +29,7 @@ export * from "./replay";
 export { agentEnv } from "./util/agent-env";
 export { brokenInstallMessage } from "./util/detect-exe";
 export { type DiskStat, DiskWorkspace, tempPathFor } from "./util/disk-workspace";
+export { type DurableWriteOptions, writeFileDurably } from "./util/durable-file";
 export {
   isElectronRuntime,
   ownNodeEnv,

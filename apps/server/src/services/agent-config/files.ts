@@ -1,15 +1,6 @@
 import { createHash } from "node:crypto";
-import {
-  cpSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { basename, join } from "node:path";
 import type {
   AgentConfigDeleteResponse,
   AgentConfigDiff,
@@ -17,6 +8,7 @@ import type {
   AgentConfigLocator,
   AgentConfigWriteResponse,
 } from "@agent-rishi/contracts";
+import { writeFileDurably } from "@agent-rishi/providers";
 import { structuredPatch } from "diff";
 import { badRequest, conflict, forbidden, ServiceError } from "../errors";
 import { resolveInside } from "../files/path-guard";
@@ -155,12 +147,9 @@ export class AgentConfigFiles {
   }
 }
 
-/** Write through a temp file and rename, creating parent folders. */
+/** Write atomically and durably (`writeFileDurably`), creating parent folders. */
 export function atomicWrite(path: string, content: string): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.agent-rishi-${process.pid}.tmp`;
-  writeFileSync(tmp, content, "utf8");
-  renameSync(tmp, path);
+  writeFileDurably(path, content);
 }
 
 /** A unified diff (`diff` package) with addition and deletion counts. */

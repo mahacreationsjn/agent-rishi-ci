@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { writeFileDurably } from "@agent-rishi/providers";
 import { ServiceError } from "../errors";
 import type { ProjectService } from "../projects/project-service";
 
@@ -35,10 +36,7 @@ export class ProjectNotes {
       throw new ServiceError(413, "notes_too_large", "Project notes are limited to 200 KB");
     }
     const file = this.path(projectId);
-    mkdirSync(dirname(file), { recursive: true });
-    const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync(tmp, next, "utf8");
-    renameSync(tmp, file);
+    writeFileDurably(file, next);
     return next;
   }
 }
