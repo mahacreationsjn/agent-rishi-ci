@@ -17,6 +17,7 @@ import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { Arch, build, Platform } from "electron-builder";
 import config, { keyringBinary } from "../electron-builder.config.mjs";
+import { assertNsisPathsFit } from "./nsis-paths.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const { values } = parseArgs({
@@ -41,6 +42,10 @@ function electronDistDir() {
 
 if (!existsSync(join(root, "dist", "main.js")) || !existsSync(join(root, "dist", "web"))) {
   throw new Error("apps/desktop/dist is missing: run `pnpm build` first");
+}
+// Windows installers only (`--dir` builds no installer): fail now, not after minutes of packing.
+if (process.platform === "win32" && !values.dir) {
+  assertNsisPathsFit(join(root, "package.json"));
 }
 
 // 1. Stage.

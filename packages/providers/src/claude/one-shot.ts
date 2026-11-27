@@ -6,6 +6,26 @@ import { type OneShotRequest, oneShotSignal, type UtilityModel } from "../utilit
 import { claudeEnv, executableOptions } from "./options";
 import { loadClaudeSdk } from "./sdk";
 
+/**
+ * Why a one-shot's `result` message failed. An error the CLI reports as a turn (a usage limit, an
+ * API error) arrives as `subtype: "success"` with `is_error` and the reason in `result`; other
+ * failures carry it in `errors`. Without the reason the log said only "failed: success".
+ */
+export function oneShotFailure(message: {
+  subtype?: string;
+  is_error?: boolean;
+  result?: unknown;
+  errors?: unknown;
+}): string {
+  const errors = Array.isArray(message.errors)
+    ? message.errors.filter((e): e is string => typeof e === "string" && e.trim() !== "")
+    : [];
+  const result = typeof message.result === "string" ? message.result.trim() : "";
+  const reason = [...errors, ...(result ? [result] : [])].join("; ").replace(/\s+/g, " ");
+  const kind = message.subtype && message.subtype !== "success" ? message.subtype : "error";
+  return `Utility model failed (${kind})${reason ? `: ${reason.slice(0, 300)}` : ""}`;
+}
+
 /** Default utility model: the CLI's small-model alias. */
 export const CLAUDE_UTILITY_MODEL = "haiku";
 
@@ -55,7 +75,7 @@ export class ClaudeUtilityModel implements UtilityModel {
         }
         if (message.type === "result") {
           if (message.subtype !== "success" || message.is_error) {
-            throw new Error(`Utility model failed: ${message.subtype}`);
+            throw new Error(oneShotFailure(message));
           }
           return (str(message, "result") ?? text).trim();
         }
