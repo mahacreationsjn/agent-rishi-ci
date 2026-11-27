@@ -210,6 +210,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       if (configId === "mode") update({ sessionUpdate: "current_mode_update", currentModeId: value });
       return send({ id: msg.id, result: { configOptions: configOptions() } });
     }
+    case "session/close":
+      return send({ id: msg.id, result: {} });
     case "session/prompt":
       return void prompt(msg);
     case "session/cancel":
