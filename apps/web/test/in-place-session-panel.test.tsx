@@ -8,7 +8,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "@/components/shell/app-shell";
 import { ThreadHeader } from "@/components/thread/thread-header";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -160,6 +160,19 @@ function asPhone() {
       }) as MediaQueryList,
   );
 }
+
+/**
+ * The Files and Diff tabs load their code from chunks of their own the first time they render
+ * (`components/on-demand.tsx`). In a test that import is a cold transform of a large module,
+ * which on a busy machine can outlast a `findBy*` wait. Load them before the tests, so the
+ * waits measure the panels, not the import.
+ */
+beforeAll(async () => {
+  await Promise.all([
+    import("@/components/workbench/files-panel"),
+    import("@/components/workbench/diff-panel"),
+  ]);
+}, 60_000);
 
 beforeEach(() => {
   localStorage.clear();

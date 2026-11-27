@@ -9,7 +9,7 @@ import type {
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { Toaster, toast } from "sonner";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { LiveEffects } from "@/components/shell/live-effects";
 import { makeSession } from "@/lib/api/mock/fixtures/helpers";
 import type { PlatformBridge } from "@/lib/platform";
@@ -118,6 +118,17 @@ async function toastCount(): Promise<number> {
   });
   return document.querySelectorAll("[data-sonner-toast]").length;
 }
+
+/**
+ * Sonner removes a dismissed toast 200 ms later, on a timer of its own. After the last test the
+ * file's environment is torn down, and a timer that fires then finds no `window` (an uncaught
+ * error on a busy machine). Wait it out while the environment still exists.
+ */
+const SONNER_UNMOUNT_DELAY_MS = 200;
+
+afterAll(async () => {
+  await new Promise((resolve) => setTimeout(resolve, SONNER_UNMOUNT_DELAY_MS + 100));
+});
 
 afterEach(() => {
   act(() => toast.dismiss());
