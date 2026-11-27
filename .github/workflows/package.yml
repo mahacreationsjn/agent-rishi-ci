@@ -1,0 +1,73 @@
+name: Package
+
+# Build the desktop installers on a hosted runner and keep them as a workflow artifact, so a
+# release can add them (`node scripts/release/local-release.mjs --upload-only vX.Y.Z` with the
+# files downloaded) without a machine of that operating system. Linux first: Enterprise ships
+# for Linux only (docs/foundation.md). Runs for a version tag, or by hand.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux installers (AppImage, deb)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Package the desktop app
+        working-directory: apps/desktop
+        run: node scripts/package.mjs --publish never
+      - name: Pick the release files and write their checksums
+        shell: bash
+        run: |
+          # The same selection, names and checksums as a release from a maintainer's machine.
+          node --input-type=module -e '
+            import { readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+            import { join } from "node:path";
+            import { assetName, releaseArtifacts, sha256sums } from "./scripts/release/local-release.mjs";
+            const dir = "apps/desktop/release";
+            const version = JSON.parse(readFileSync("apps/desktop/package.json", "utf8")).version;
+            const files = releaseArtifacts(readdirSync(dir), version).map((f) => {
+              const name = assetName(f);
+              if (name !== f) renameSync(join(dir, f), join(dir, name));
+              return name;
+            });
+            if (!files.some((f) => f.endsWith(".AppImage")) || !files.some((f) => f.endsWith(".deb"))) {
+              console.error(`::error::no AppImage or deb for ${version}: ${files.join(", ")}`);
+              process.exit(1);
+            }
+            writeFileSync(join(dir, "SHA256SUMS-linux.txt"), sha256sums(dir, files));
+            writeFileSync(join(dir, "release-files.txt"), [...files, "SHA256SUMS-linux.txt"].join("\n") + "\n");
+            console.log(files.join("\n"));
+          '
+      - name: Check the deb package
+        shell: bash
+        run: |
+          deb=$(ls apps/desktop/release/*.deb)
+          dpkg-deb --info "$deb" | grep -E "Package|Version|Architecture|Depends"
+          # Into a file first: `| head` closing the pipe early fails the step under pipefail.
+          dpkg-deb --contents "$deb" > "$RUNNER_TEMP/deb-contents.txt"
+          grep -E "applications/agent-rishi.desktop|/opt/Agent Rishi/agent-rishi$" "$RUNNER_TEMP/deb-contents.txt"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: desktop-linux
+          path: |
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.deb
+            apps/desktop/release/*.blockmap
+            apps/desktop/release/latest-linux*.yml
+            apps/desktop/release/SHA256SUMS-linux.txt
+          if-no-files-found: error
+          retention-days: 30
