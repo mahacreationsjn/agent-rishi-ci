@@ -45,7 +45,10 @@ apps/
 packages/
   contracts/  zod schemas for everything that crosses a boundary
   providers/  Provider adapters (Claude, Codex, Fake, Replay) and image engines
-docs/         User docs and DESIGN.md
+editions/
+  solo/       Agent Rishi Solo (Windows, Linux); apps/ and packages/ never import an edition
+  enterprise/ Agent Rishi Enterprise (Linux); see editions/README.md
+docs/         User docs, DESIGN.md and foundation.md
 changes/      Changelog fragments for the next release (see changes/README.md)
 ```
 

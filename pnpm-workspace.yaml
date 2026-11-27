@@ -1,6 +1,7 @@
 packages:
   - apps/*
   - packages/*
+  - editions/*
 onlyBuiltDependencies:
   - esbuild
   - node-pty

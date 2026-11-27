@@ -1,0 +1,17 @@
+{
+  "name": "@agent-rishi/edition-solo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Agent Rishi Solo: one person runs a whole company with virtual agent teams.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@agent-rishi/contracts": "workspace:*"
+  }
+}
