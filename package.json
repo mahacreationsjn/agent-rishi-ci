@@ -15,6 +15,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:slow": "vitest run --mode slow",
+    "verify": "node scripts/verify.mjs",
     "e2e": "pnpm build && pnpm --filter @agent-rishi/web e2e",
     "desktop:dev": "pnpm --filter @agent-rishi/web build && pnpm --filter @agent-rishi/desktop build && pnpm --filter @agent-rishi/desktop dev",
     "desktop:build": "pnpm build && pnpm --filter @agent-rishi/desktop package --dir",
