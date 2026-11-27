@@ -10,6 +10,8 @@ Usage:
   agent-rishi doctor         Check the installation (--install: add Claude Code support now)
   agent-rishi update         Says how to update: from git (git pull, pnpm install, pnpm build)
   agent-rishi stop           Stop the server and the runner
+  agent-rishi backup         Take a verified backup of the database now
+  agent-rishi restore [name] List the database backups, or restore one (stop Agent Rishi first)
   agent-rishi password       Set the network access password (--generate: make one up)
   agent-rishi network on|off Let phones on your network open Agent Rishi, or stop it
                          (on --loopback-only: stay on 127.0.0.1 behind a proxy such as Tailscale Serve)

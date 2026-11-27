@@ -1,4 +1,13 @@
 /** @agent-rishi/server public API. */
+export {
+  backupDatabase,
+  checkDatabaseFile,
+  DatabaseDamagedError,
+  type DbBackup,
+  dbBackupDir,
+  listDbBackups,
+  restoreDatabase,
+} from "./db/safety";
 export type { NetworkAccess } from "./network/access";
 export { isLoopbackAddress, listAddresses } from "./network/addresses";
 export { generatePassphrase } from "./network/password";
