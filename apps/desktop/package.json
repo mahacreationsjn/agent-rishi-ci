@@ -1,6 +1,6 @@
 {
   "name": "@agent-rishi/desktop",
-  "version": "0.7.10",
+  "version": "0.8.0",
   "private": true,
   "description": "Agent Rishi desktop app: an Electron shell that starts (or attaches to) the Agent Rishi server and loads the same UI.",
   "license": "MIT",

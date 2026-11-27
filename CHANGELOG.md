@@ -6,6 +6,39 @@ All notable changes to Agent Rishi are documented here. The format follows [Keep
 
 The notes for the next release are in [`changes/`](changes/README.md), one file per change. The release moves them into a version section here.
 
+## [0.8.0] - 2026-11-27
+
+### Added
+
+- **Plan mode on Antigravity CLI.** A plan-mode session on Antigravity CLI shows its plan and asks you to approve it, as on the other providers; approving carries the plan out in the same turn. Its own working notes (plan, task list, walkthrough), which it keeps in its own folder, no longer ask for approval.
+- **Antigravity CLI as an agent provider.** Sessions can run on Google's Antigravity CLI (`agy acp`, 1.5.12 or newer) with your own Google login, no API key needed. Agent Rishi gives it a settings file of its own that makes it ask before every action, so your permission levels, approvals and read-only sessions work as with the other providers, and your deny rules stay. Reasoning effort maps to its thinking level. Setup shows its version and sign-in, and **Sign in** runs `agy acp --login`. Skills aren't wired up yet.
+- **Questions from Antigravity CLI.** When an Antigravity CLI session asks you something, it now shows as a question card with its choices, several when it allows more than one, and room to type your own answer; your answer goes straight back to it. A project manager can answer its questions too. A form from one of your MCP servers shows as that server's and stays with you.
+- **Steering Antigravity CLI.** While an Antigravity CLI session is working, a message you send can now join the running turn: the agent reads it after its current step and carries on with both. If it is waiting for your approval or answer, the message goes as soon as you reply. Stop drops a message it hasn't read yet and says so.
+- **Antigravity CLI subagents and skills.** When an Antigravity CLI session hands work to a subagent, it now shows as a subagent card with a thread of its own, holding the subagent's steps and the approvals it asks for. Its `/` commands and skills are in the composer's `/` menu, and a message starting with `/<name>` runs one.
+- **Project managers can clear stale Inbox items.** A PM can list every open Inbox item of its project (`list_project_inbox`) and dismiss a stale triage decision or informational message with a reason (`resolve_inbox_item`). Approvals, questions, MCP forms and other projects' items stay with you. The Inbox shows who dismissed the item and why, with **Restore** to bring it back.
+- **Quit and Stop Agents.** The tray has a second quit option that also stops the runner, after you confirm, as `agent-rishi stop` does. Plain **Quit** still leaves agents running, and sessions resume on the next launch either way.
+
+### Changed
+
+- **Colours from the logo, and no more amber.** Buttons, links, focus rings, highlights, text selection and the Factory view's Floor lanes now use the sky blue of the logo's antenna, in both the light and dark themes, with a second, deeper blue where two colours sit side by side (question cards, the Supervised permission level, Floor reviewers). What waits on you is now pink instead of amber: the **Waiting on you** list, approval cards, **Needs you**, the dot on the browser tab, the desktop app's taskbar badge and, on the Floor, figures waiting for approval, the signal tower while CI runs and the status board's waiting count.
+
+### Fixed
+
+- **Desktop packaging uses the staged npm dependencies** when launched through pnpm, so the installer includes the runtime packages the app needs.
+- **Antigravity CLI sign-in.** Setup and Settings recognize existing Windows Credential Manager and macOS Keychain entries. When a login cannot be confirmed, Agent Rishi shows a warning and lets you continue.
+- **Antigravity CLI token counts.** The input tokens shown for an Antigravity CLI session no longer drop to zero or too low when it reuses cached context: Antigravity CLI already counts cached tokens apart from its input, and Agent Rishi no longer takes them away a second time.
+- Retry factory reviews in a detached workspace pinned to the pull request commit, avoiding collisions with an earlier review branch.
+- **Codex sessions on Auto or Full no longer get stuck read-only.** Every Codex turn now carries the session's sandbox and approval policy, not only the turn after a permissions change. Codex keeps the sandbox of a thread it still has loaded when Agent Rishi resumes it, so a builder could show Full yet run in a read-only worktree until its permissions were changed. When Codex reports a different sandbox than the one asked for, the transcript shows a warning.
+- Factory Board distinguishes pull requests waiting on GitHub from decisions that need a person, and keeps intentional stops in history without prompting a retry.
+- Show aging Project Manager messages and keep the pending queue when stopping the current turn.
+- Show project activity separately from factory pipeline work, with links to the existing sessions.
+- Recover after Codex loses a thread during steering and keep the unsent follow-up in the queue.
+- **Triage decisions close with their issue.** A "Should I take this on?" item in the Inbox now resolves on its own once GitHub sync sees its issue closed, and stays in the Inbox history. Items left from before resolve at startup.
+- **Antigravity CLI models.** The model picker lists your account's Antigravity models (for example Gemini 4 Hydrogen, Gemini 3.8 Flash, Claude and GPT-OSS models) at start-up and on **Refresh models**, instead of Default alone until a first Antigravity session had run. Listing opens a short Antigravity session that sends no prompt and is closed at once.
+- **The desktop app includes every runtime dependency again.** playwright-core was missing from the 0.7.10 installer, so the runner failed to start. The build now copies any runtime dependency the packed app lacks and fails if one is still missing.
+- **Setup sign-in.** Paste a login code with Ctrl+V or right-click, then press Enter. Setup re-checks automatically when sign-in succeeds and recognizes both Windows Credential Manager formats for Antigravity CLI.
+- **Utility model errors say why.** When a follow-up, title or summary job on Claude fails, the log now gives the reason (a usage limit, an API error) instead of only "Utility model failed: success".
+
 ## [0.7.10] - 2026-11-25
 
 ### Changed
