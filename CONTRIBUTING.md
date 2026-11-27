@@ -125,6 +125,30 @@ To re-record the Replay fixtures or regenerate the Codex protocol types, see [pa
 
 ## Releasing (maintainers)
 
+### From your machine (while hosted CI is unavailable)
+
+Before releasing, run `pnpm verify`: it runs the CI checks locally. Then, on an up-to-date `main` with a clean tree, run:
+
+```sh
+node scripts/release/local-release.mjs patch --dry-run   # check, verify and build; change nothing
+node scripts/release/local-release.mjs patch             # release (minor / major likewise)
+```
+
+A release does these steps in order:
+
+1. **Checks.** It must be on `main`, with a clean tree, even with `origin/main`. The tag must be free and `gh` signed in. On Windows, the checkout's paths must be short enough for NSIS (use a short folder such as `C:\src\agent-rishi`).
+2. **Verify and bump.** It runs `pnpm verify`, then `bump-version.mjs`, and commits `chore(release): X.Y.Z`.
+3. **Build.** It builds this OS's installers and writes `SHA256SUMS-<os>.txt`.
+4. **Publish to GitHub.** It tags `vX.Y.Z`, pushes `main` and the tag, and creates a GitHub Release with the installers, `latest*.yml` and checksums.
+
+The release is created as a **draft** (visible only to repository members). Publish it on GitHub when ready, or pass `--publish`. If the build fails, the release commit is undone. Nothing goes to npm.
+
+To add another OS's installers to the same release (for example Linux after Windows), check out the tag on that machine and run `node scripts/release/local-release.mjs --upload-only vX.Y.Z`.
+
+Releases are unsigned unless signing certificates are configured (see `apps/desktop/electron-builder.config.mjs`). In a **private** repository, the desktop app can't fetch updates from GitHub Releases without a token: install new versions by hand there.
+
+### With the Release workflow
+
 The published package is `apps/cli` (`agent-rishi` on npm). Run **Actions › Release › Run workflow** on `main` and pick **patch**, **minor** or **major**. The workflow runs `scripts/release/bump-version.mjs`, which bumps the version in `apps/cli/package.json`, `apps/desktop/package.json` and `SOURCE_VERSION` in `packages/contracts/src/version.ts` (a test keeps them in sync), assembles the fragments in `changes/` into the new version's section of [CHANGELOG.md](CHANGELOG.md) and deletes them. Once the checks and the build pass, it commits `chore(release): X.Y.Z`, tags it, publishes with provenance and creates a GitHub Release. **dry-run** builds and packs without releasing. `pnpm changelog:preview` prints the changelog section the next release would add, without changing anything. To release by hand, run `node scripts/release/bump-version.mjs <patch|minor|major>`, commit what it changed and staged, then tag and push `vX.Y.Z`. Packing copies the root README into the package (`apps/cli/scripts/copy-readme.mjs`).
 
 ## Reporting security issues
