@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  assetName,
   changelogSection,
   parseReleaseArgs,
   preflightProblems,
@@ -103,6 +104,17 @@ describe("releaseArtifacts", () => {
       "latest-linux.yml",
       "latest.yml",
     ]);
+  });
+});
+
+describe("assetName", () => {
+  it("uses the dashed names latest*.yml points at", () => {
+    expect(assetName("Agent Rishi-Setup-0.8.0.exe")).toBe("Agent-Rishi-Setup-0.8.0.exe");
+    expect(assetName("Agent Rishi-Setup-0.8.0.exe.blockmap")).toBe(
+      "Agent-Rishi-Setup-0.8.0.exe.blockmap",
+    );
+    expect(assetName("agent_rishi_0.8.0_amd64.deb")).toBe("agent_rishi_0.8.0_amd64.deb");
+    expect(assetName("latest.yml")).toBe("latest.yml");
   });
 });
 
