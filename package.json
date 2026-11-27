@@ -22,7 +22,8 @@
     "desktop:dist": "pnpm build && pnpm --filter @agent-rishi/desktop package",
     "e2e:desktop": "pnpm desktop:build && pnpm --filter @agent-rishi/desktop e2e",
     "db:generate": "pnpm --filter @agent-rishi/server run db:generate",
-    "changelog:preview": "node scripts/release/bump-version.mjs patch --dry-run"
+    "changelog:preview": "node scripts/release/bump-version.mjs patch --dry-run",
+    "release": "node scripts/release/local-release.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.6",
