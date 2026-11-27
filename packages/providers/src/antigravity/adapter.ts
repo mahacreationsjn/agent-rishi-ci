@@ -10,7 +10,13 @@ import { classifyAcpError } from "../acp/errors";
 import type { AcpAgentSpec } from "../acp/extensions";
 import type { AcpInitializeResult, AcpSessionSetup } from "../acp/protocol";
 import { AcpSession } from "../acp/session";
-import { type ProviderAdapter, type ProviderSession, ProviderSessionError } from "../adapter";
+import {
+  type ProviderAdapter,
+  type ProviderSession,
+  ProviderSessionError,
+  type RefreshModelsOptions,
+} from "../adapter";
+import { executableFingerprint, ModelFreshness } from "../freshness";
 import { ModelCatalog } from "../models";
 import type { ResolvedCommand } from "../util/exec";
 import { findExecutable, type LocateOptions } from "../util/locate";
@@ -24,7 +30,7 @@ import {
 } from "./detect";
 import { agyExtensions } from "./extensions";
 import { AGY_EFFORT, agyModelInfos, fallbackAgyModels } from "./models";
-import { AGY_ACP_ARGS, type AgyProbe, probeAgy } from "./probe";
+import { AGY_ACP_ARGS, type AgyProbe, listAgyModels, probeAgy } from "./probe";
 import { agyDir, writeAgySettings } from "./settings";
 import { AGY_SUBAGENTS } from "./subagents";
 
@@ -101,6 +107,9 @@ export class AntigravityAdapter implements ProviderAdapter {
   /** Whether the last session listed a `plan` mode; unknown until one has. */
   private planListed: boolean | undefined;
   private found: { command: ResolvedCommand; version: string | null } | undefined;
+  private readonly freshness = new ModelFreshness();
+  /** The model listing under way, so concurrent refreshes share one CLI start. */
+  private listing: Promise<void> | undefined;
 
   constructor(private readonly options: AntigravityAdapterOptions = {}) {}
 
@@ -153,6 +162,47 @@ export class AntigravityAdapter implements ProviderAdapter {
     return this.catalog.subscribe(listener);
   }
 
+  /**
+   * Ask the CLI for the account's models: it lists them only in a session, so a short-lived one
+   * is opened just for that (`listAgyModels`: no prompt, no model call). Without this, the picker
+   * showed Default alone until a real session had run. Never throws.
+   */
+  async refreshModels(opts: RefreshModelsOptions = {}): Promise<void> {
+    let found: { command: ResolvedCommand; version: string | null };
+    try {
+      found = await this.executable();
+    } catch {
+      return;
+    }
+    const { command, version } = found;
+    if (version && !isSupportedAgyVersion(version)) return;
+    if (
+      opts.maxAgeMs !== undefined &&
+      !this.listing &&
+      this.freshness.isFresh(executableFingerprint(command), opts.maxAgeMs)
+    ) {
+      return;
+    }
+    this.listing ??= this.listModels(command).finally(() => {
+      this.listing = undefined;
+    });
+    await this.listing;
+  }
+
+  private async listModels(command: ResolvedCommand): Promise<void> {
+    let cliDir: string | undefined;
+    try {
+      cliDir = writeAgySettings(this.options.home);
+    } catch {
+      // Listing still works on the CLI's own settings: no prompt runs.
+    }
+    const listed = await listAgyModels(command, {
+      ...(cliDir ? { cliDir } : {}),
+      ...(this.options.startTimeoutMs ? { timeoutMs: this.options.startTimeoutMs } : {}),
+    });
+    if (listed.info && listed.setup) this.onSetup(listed.setup, listed.info, command);
+  }
+
   async openSession(opts: SessionOptions): Promise<ProviderSession> {
     const { command, version } = await this.executable();
     if (version && !isSupportedAgyVersion(version)) {
@@ -171,7 +221,7 @@ export class AntigravityAdapter implements ProviderAdapter {
         args: [...ANTIGRAVITY_AGENT.args, "--cli_dir_name", cliDir],
         extensions: agyExtensions(path.join(agyDir(this.options.home), "brain")),
       },
-      onSetup: (setup, info) => this.onSetup(setup, info),
+      onSetup: (setup, info) => this.onSetup(setup, info, command),
       ...(this.options.startTimeoutMs ? { startTimeoutMs: this.options.startTimeoutMs } : {}),
       ...(this.options.interruptTimeoutMs
         ? { interruptTimeoutMs: this.options.interruptTimeoutMs }
@@ -187,12 +237,15 @@ export class AntigravityAdapter implements ProviderAdapter {
   }
 
   /** A session reported its models: they are the account's current ones. */
-  private onSetup(setup: AcpSessionSetup, info: AcpInitializeResult): void {
+  private onSetup(setup: AcpSessionSetup, info: AcpInitializeResult, from: ResolvedCommand): void {
     this.info = info;
     const modes = modeIds(setup);
     if (modes.length) this.planListed = modes.includes(ANTIGRAVITY_AGENT.modes.plan ?? "plan");
     const reported = modelsOf(setup);
-    if (reported?.models.length) this.catalog.set(agyModelInfos(setup, reported.models));
+    if (reported?.models.length) {
+      this.freshness.confirm(executableFingerprint(from));
+      this.catalog.set(agyModelInfos(setup, reported.models));
+    }
   }
 
   private async probe(exe: ResolvedCommand, version: string | null): Promise<AgyProbe> {

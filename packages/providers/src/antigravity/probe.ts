@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { startAgent } from "../acp/process";
-import type { AcpInitializeResult } from "../acp/protocol";
+import type { AcpInitializeResult, AcpSessionSetup } from "../acp/protocol";
 import { AcpRpcError, METHOD_NOT_FOUND } from "../acp/rpc";
 import type { ResolvedCommand } from "../util/exec";
 
@@ -64,13 +64,88 @@ export async function probeAgy(
     await started.rpc.close();
     return { acp: true, info: started.info };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      acp: false,
-      error: [message, stderr.trim().split(/\r?\n/).slice(-3).join(" ")]
-        .filter(Boolean)
-        .join(": ")
-        .slice(0, 400),
-    };
+    return { acp: false, error: failure(error, stderr) };
   }
+}
+
+/** What a short-lived `agy acp` session reported about the account's models. */
+export interface AgyModelListing {
+  info?: AcpInitializeResult;
+  /** The `session/new` result: its `model` and `thought_level` options list the models. */
+  setup?: AcpSessionSetup;
+  /** Why no list came back, when none did. */
+  error?: string;
+}
+
+/**
+ * Antigravity CLI lists the account's models only in a session, so open one just for that: in
+ * Agent Rishi's own scratch folder, with its strict settings (`--cli_dir_name`), no MCP servers of
+ * Agent Rishi's and no `authenticate` (a signed-out CLI fails `session/new`; no browser login
+ * opens). No prompt is sent, so no model is called. The session is closed and the process
+ * stopped at once. Never throws.
+ */
+export async function listAgyModels(
+  exe: ResolvedCommand,
+  opts: { cliDir?: string; timeoutMs?: number } = {},
+): Promise<AgyModelListing> {
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const cwd = scratchDir();
+  let stderr = "";
+  let started: Awaited<ReturnType<typeof startAgent>> | undefined;
+  try {
+    started = await startAgent(
+      exe,
+      {
+        onNotification: () => {},
+        onRequest: async () => {
+          throw new AcpRpcError(METHOD_NOT_FOUND, "not supported");
+        },
+        onExit: (_code, tail) => {
+          stderr = tail;
+        },
+      },
+      {
+        args: [...AGY_ACP_ARGS, ...(opts.cliDir ? ["--cli_dir_name", opts.cliDir] : [])],
+        label: "Antigravity CLI",
+        cwd,
+        timeoutMs,
+      },
+    );
+    const { rpc, info } = started;
+    const setup = await withTimeout(
+      rpc.request<AcpSessionSetup>("session/new", { cwd, mcpServers: [] }),
+      timeoutMs,
+    );
+    if (setup?.sessionId && info.agentCapabilities?.sessionCapabilities?.close) {
+      await withTimeout(rpc.request("session/close", { sessionId: setup.sessionId }), 5_000).catch(
+        () => undefined,
+      );
+    }
+    return { info, setup: setup ?? {} };
+  } catch (error) {
+    return { ...(started ? { info: started.info } : {}), error: failure(error, stderr) };
+  } finally {
+    await started?.rpc.close();
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Antigravity CLI did not answer within ${ms / 1000}s`)),
+      ms,
+    );
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** An error and the last lines the CLI printed, short enough for a status line. */
+function failure(error: unknown, stderr: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return [message, stderr.trim().split(/\r?\n/).slice(-3).join(" ")]
+    .filter(Boolean)
+    .join(": ")
+    .slice(0, 400);
 }

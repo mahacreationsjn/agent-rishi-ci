@@ -21,8 +21,9 @@ export interface AcpInitializeResult {
     /**
      * Session features beyond version 1's core. `subagents` (an object) means the agent runs
      * its subagents as child sessions, because the client opted in (`clientCapabilities`).
+     * `close` means the agent accepts `session/close`.
      */
-    sessionCapabilities?: { subagents?: unknown; list?: unknown } | null;
+    sessionCapabilities?: { subagents?: unknown; list?: unknown; close?: unknown } | null;
   };
   authMethods?: { id: string; name?: string; description?: string }[];
   agentInfo?: { name?: string; version?: string };
