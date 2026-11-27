@@ -1,5 +1,5 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
+import { writeFileDurably } from "@agent-rishi/providers";
 
 /** Read and parse a JSON file; `undefined` when missing or unparsable. */
 export function readJsonFile(file: string): unknown {
@@ -10,10 +10,10 @@ export function readJsonFile(file: string): unknown {
   }
 }
 
-/** Write JSON atomically (temp file + rename) so readers never see a partial file. */
+/**
+ * Write JSON atomically and durably (`writeFileDurably`): readers never see a partial file, and
+ * a power cut leaves the old file or the new one, never an empty one.
+ */
 export function writeJsonFile(file: string, value: unknown, mode?: number): void {
-  mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, mode ? { mode } : undefined);
-  renameSync(tmp, file);
+  writeFileDurably(file, `${JSON.stringify(value, null, 2)}\n`, mode ? { mode } : {});
 }

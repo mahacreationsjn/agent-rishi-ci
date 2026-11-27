@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import { type Project, parseVision, type VisionResponse } from "@agent-rishi/contracts";
+import { writeFileDurably } from "@agent-rishi/providers";
 import { badRequest } from "../errors";
 
 export { parseProtectedAreas, parseVision } from "@agent-rishi/contracts";
@@ -79,10 +80,6 @@ export function readVision(project: Project): VisionResponse {
 
 /** Write the vision atomically (in the main checkout; commit it to share it with agents). */
 export function writeVision(project: Project, contents: string): VisionResponse {
-  const file = visionFile(project);
-  mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, contents.endsWith("\n") ? contents : `${contents}\n`);
-  renameSync(tmp, file);
+  writeFileDurably(visionFile(project), contents.endsWith("\n") ? contents : `${contents}\n`);
   return readVision(project);
 }

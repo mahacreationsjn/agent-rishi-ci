@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import {
@@ -21,6 +21,7 @@ import {
   ReplayProvider,
   type ResolvedCommand,
   resolveExecutable,
+  writeFileDurably,
 } from "@agent-rishi/providers";
 import { serve, upgradeWebSocket } from "@hono/node-server";
 import { Hono } from "hono";
@@ -328,9 +329,7 @@ export async function startRunner(opts: StartRunnerOptions): Promise<RunningRunn
     startedAt: core.startedAt,
     providers: registry.list().map((a) => a.id),
   };
-  const tmp = `${lockFile}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
-  renameSync(tmp, lockFile);
+  writeFileDurably(lockFile, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
   log(`runner ${journal.runnerId} listening on 127.0.0.1:${port}`);
   // Ask providers for their models now, so pickers are right before the first session.
   // Spawns provider CLIs, so it runs in the background; it never throws.

@@ -1,21 +1,14 @@
 import { createHash } from "node:crypto";
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, relative, sep } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 import type {
   FileContent,
   FileReadQuery,
   FileRoot,
   FileWriteRequest,
 } from "@agent-rishi/contracts";
+import { writeFileDurably } from "@agent-rishi/providers";
 import { badRequest, conflict, forbidden, ServiceError } from "../errors";
 import type { ProjectService } from "../projects/project-service";
 import { resolveInside } from "./path-guard";
@@ -101,10 +94,7 @@ export class ConfigFiles {
         join(this.deps.backupDir, `${stamp}-${req.root}-${basename(absolutePath)}`),
       );
     }
-    mkdirSync(dirname(absolutePath), { recursive: true });
-    const tmp = `${absolutePath}.agent-rishi-${process.pid}.tmp`;
-    writeFileSync(tmp, req.content, "utf8");
-    renameSync(tmp, absolutePath);
+    writeFileDurably(absolutePath, req.content);
     return this.read({ root: req.root, projectId: req.projectId, path: relativePath });
   }
 
