@@ -46,6 +46,30 @@
       "linter": {
         "rules": { "suspicious": { "noTemplateCurlyInString": "off" } }
       }
+    },
+    {
+      "includes": ["apps/**", "packages/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@agent-rishi/edition-solo": "The Foundation never imports an edition (editions/README.md).",
+                  "@agent-rishi/edition-enterprise": "The Foundation never imports an edition (editions/README.md)."
+                },
+                "patterns": [
+                  {
+                    "group": ["**/editions/**"],
+                    "message": "The Foundation never imports an edition (editions/README.md)."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "css": {

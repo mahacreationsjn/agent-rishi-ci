@@ -16,6 +16,7 @@ export * from "./checks";
 export * from "./common";
 export * from "./content-security";
 export * from "./desktop";
+export * from "./edition";
 export * from "./entities/artifact";
 export * from "./entities/automation";
 export * from "./entities/inbox";

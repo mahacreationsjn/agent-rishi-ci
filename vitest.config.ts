@@ -138,6 +138,8 @@ const AROUND_MIDNIGHT = ["23:50", "00:05"].map((at) => ({
 /** The fast suites: `pnpm test`, CI and the release run these. */
 const FAST = [
   "packages/*",
+  "editions/solo",
+  "editions/enterprise",
   "apps/web",
   "apps/cli",
   {

@@ -1,0 +1,17 @@
+{
+  "name": "@agent-rishi/edition-enterprise",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Agent Rishi Enterprise: each department head runs their own virtual team for technical work.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@agent-rishi/contracts": "workspace:*"
+  }
+}
