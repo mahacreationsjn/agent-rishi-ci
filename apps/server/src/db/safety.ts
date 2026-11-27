@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
+import { DATABASE_DAMAGED } from "@agent-rishi/contracts";
 
 /**
  * Keeping the database safe (F1 of `docs/foundation.md`): verified backups in
@@ -137,6 +138,9 @@ export function pruneDbBackups(dir: string, keep: number): void {
 
 /** The database looks damaged; the server does not start on it. */
 export class DatabaseDamagedError extends Error {
+  /** As `ErrnoException.code`, so the desktop app can tell it apart and offer a restore. */
+  readonly code = DATABASE_DAMAGED;
+
   constructor(
     readonly file: string,
     readonly problems: string[],
@@ -222,6 +226,22 @@ export function restoreDatabase(
   }
   copyFileSync(restored.file, file);
   return { restored, setAside };
+}
+
+/**
+ * Restore the newest backup that passes its check (`restoreDatabase`), for the desktop app's
+ * Restore button. Throws when there is none.
+ */
+export function restoreNewestBackup(
+  file: string,
+  backupDir: string,
+  now = new Date(),
+): RestoreResult {
+  for (const candidate of listDbBackups(backupDir)) {
+    if (checkDatabaseFile(candidate.file).length) continue;
+    return restoreDatabase(file, backupDir, candidate.name, now);
+  }
+  throw new Error(`There is no usable database backup in ${backupDir}`);
 }
 
 /** True when the newest backup is older than `everyMs` (or there is none). */

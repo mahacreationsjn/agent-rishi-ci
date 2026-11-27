@@ -91,7 +91,10 @@ export const DesktopServerMessage = z.discriminatedUnion("type", [
     launchUrl: z.string(),
     version: z.string(),
   }),
-  /** The server could not start (`code` is e.g. `EADDRINUSE`). */
+  /**
+   * The server could not start (`code` is e.g. `EADDRINUSE`, or `DATABASE_DAMAGED`: the app
+   * offers to restore the newest database backup).
+   */
   z.object({ type: z.literal("failed"), message: z.string(), code: z.string().nullable() }),
   /** Run an updater command; answered with `update.done` carrying the same `id`. */
   z.object({ type: z.literal("update.command"), id: z.string(), command: DesktopUpdateCommand }),
@@ -111,6 +114,12 @@ export type DesktopHostMessage = z.infer<typeof DesktopHostMessage>;
 
 /** The custom URL scheme the desktop app registers. */
 export const DEEP_LINK_SCHEME = "agent-rishi";
+
+/**
+ * Error code of a server that refused to start on a damaged database (after an unclean
+ * shutdown). The desktop app then offers to restore the newest backup.
+ */
+export const DATABASE_DAMAGED = "database_damaged";
 
 /** Where a `agent-rishi://` link points. */
 export const DeepLinkTarget = z.discriminatedUnion("kind", [

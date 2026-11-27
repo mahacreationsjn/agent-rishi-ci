@@ -27,6 +27,8 @@ export interface ConnectOptions {
   onExit: (exit: ServerExit) => void;
   onUnexpectedExit: (code: number | null) => void;
   log: (message: string) => void;
+  /** Put the newest database backup in place before starting a server (the Restore button). */
+  restoreNewestBackup?: boolean;
 }
 
 /**
@@ -59,6 +61,7 @@ export async function connect(opts: ConnectOptions): Promise<Connection> {
       onExit: opts.onExit,
       onUnexpectedExit: opts.onUnexpectedExit,
       log,
+      restoreNewestBackup: opts.restoreNewestBackup,
     });
     try {
       const ready: ServerReady = await server.start();

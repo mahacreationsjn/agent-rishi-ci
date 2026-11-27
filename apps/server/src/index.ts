@@ -7,6 +7,7 @@ export {
   dbBackupDir,
   listDbBackups,
   restoreDatabase,
+  restoreNewestBackup,
 } from "./db/safety";
 export type { NetworkAccess } from "./network/access";
 export { isLoopbackAddress, listAddresses } from "./network/addresses";

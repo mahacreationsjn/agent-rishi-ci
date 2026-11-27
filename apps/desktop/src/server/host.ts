@@ -32,12 +32,18 @@ const { values } = parseArgs({
     home: { type: "string" },
     port: { type: "string", default: "0" },
     fake: { type: "boolean", default: false },
+    "restore-newest-backup": { type: "boolean", default: false },
   },
 });
 
 import("./serve")
   .then(({ serve }) =>
-    serve({ home: values.home, port: Number(values.port), fake: values.fake === true }),
+    serve({
+      home: values.home,
+      port: Number(values.port),
+      fake: values.fake === true,
+      restoreNewestBackup: values["restore-newest-backup"] === true,
+    }),
   )
   .catch((error: unknown) => {
     const err = error as NodeJS.ErrnoException;

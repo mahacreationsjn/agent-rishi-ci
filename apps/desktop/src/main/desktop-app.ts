@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import {
+  DATABASE_DAMAGED,
   type DesktopInfo,
   type DesktopUpdateCommand,
   deepLinkPath,
@@ -19,6 +20,7 @@ import { registerBridge } from "./ipc";
 import { appMenuTemplate } from "./menu";
 import { loadAfterReady, waitForServer } from "./recovery";
 import { homeFiles, mayReconnect, serverHealthy } from "./server-plan";
+import { ServerStartError } from "./server-process";
 import {
   applyLaunchAtLogin,
   fileLogger,
@@ -175,10 +177,14 @@ export class DesktopApp {
     await this.open();
   }
 
-  /** Connect to (or start) the server and load the UI. */
-  private async open(): Promise<void> {
+  /**
+   * Connect to (or start) the server and load the UI. `restoreNewestBackup` puts the newest
+   * database backup in place first: the answer to a server that refused a damaged database.
+   */
+  private async open(opts: { restoreNewestBackup?: boolean } = {}): Promise<void> {
     if (this.conn || this.connecting || this.quitting) return;
     this.connecting = true;
+    let restore = false;
     try {
       this.conn = await connect({
         args: this.args,
@@ -192,20 +198,38 @@ export class DesktopApp {
           });
         },
         log: this.log,
+        restoreNewestBackup: opts.restoreNewestBackup,
       });
     } catch (error) {
       this.log(`app: no server: ${String(error)}`);
-      await dialog.showMessageBox({
-        type: "error",
-        title: "Agent Rishi could not start",
-        message: "Agent Rishi could not start its server.",
-        detail: `${error instanceof Error ? error.message : String(error)}\n\nSee ${homeFiles(this.args.home).logs}.`,
-      });
-      await this.window.showRecovery();
-      return;
+      const detail = `${error instanceof Error ? error.message : String(error)}\n\nSee ${homeFiles(this.args.home).logs}.`;
+      if (
+        error instanceof ServerStartError &&
+        error.code === DATABASE_DAMAGED &&
+        !opts.restoreNewestBackup
+      ) {
+        restore = await this.offerRestore(detail);
+      } else {
+        await dialog.showMessageBox({
+          type: "error",
+          title: "Agent Rishi could not start",
+          message: "Agent Rishi could not start its server.",
+          detail,
+        });
+      }
+      if (!restore) {
+        await this.window.showRecovery();
+        return;
+      }
     } finally {
       this.connecting = false;
     }
+    if (restore) {
+      this.log("app: restoring the newest database backup");
+      await this.open({ restoreNewestBackup: true });
+      return;
+    }
+    if (!this.conn) return;
     if (this.quitting) {
       await this.conn.server?.stop({ stopRunner: false });
       return;
@@ -305,6 +329,23 @@ export class DesktopApp {
     if (response !== 0 || this.quitting) return;
     this.stopRunnerOnQuit = true;
     this.quit("tray");
+  }
+
+  /**
+   * The server refused a damaged database: offer to put the newest backup in place. Nothing is
+   * deleted either way (a restore keeps the damaged file next to it). True to restore.
+   */
+  private async offerRestore(detail: string): Promise<boolean> {
+    const { response } = await dialog.showMessageBox({
+      type: "error",
+      title: "Agent Rishi could not start",
+      message: "Agent Rishi's database looks damaged.",
+      detail: `${detail}\n\nRestore the newest backup? What happened after it was taken is lost. The damaged database is kept next to it, not deleted.`,
+      buttons: ["Restore Newest Backup", "Not Now"],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    return response === 0;
   }
 
   startupFailed(): void {
