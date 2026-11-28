@@ -5,6 +5,7 @@ import {
   ClaudeSdkStatus,
   FsListResponse,
   InboxCounts,
+  type ProviderStatus,
   ReorderProjectsResponse,
   SecretsStatus,
   SessionDetail,
@@ -21,20 +22,32 @@ const TOKEN = "a".repeat(64);
 let home: string;
 let server: RunningServer;
 
-const fakeExec: Exec = async (command, args) => {
-  const key = [command, ...args].join(" ");
-  const ok = (stdout: string) => ({
-    code: 0,
-    stdout,
-    stderr: "",
-    notFound: false,
-    timedOut: false,
-    path: command,
-  });
-  if (key === "codex --version") return ok("codex-cli 0.160.1");
-  if (key === "codex login status") return ok("Logged in using ChatGPT");
-  return { code: null, stdout: "", stderr: "", notFound: true, timedOut: false, path: null };
-};
+/** No tool is installed (setup checks never reach the machine's real tools). */
+const fakeExec: Exec = async () => ({
+  code: null,
+  stdout: "",
+  stderr: "",
+  notFound: true,
+  timedOut: false,
+  path: null,
+});
+
+function detected(providerId: string, over: Partial<ProviderStatus>): ProviderStatus {
+  return {
+    providerId,
+    installed: true,
+    version: "1.0.0",
+    executablePath: providerId,
+    loggedIn: true,
+    authMethod: "chatgpt",
+    account: null,
+    loginExpiresAt: null,
+    supported: true,
+    issues: [],
+    checkedAt: new Date().toISOString(),
+    ...over,
+  };
+}
 
 beforeEach(async () => {
   home = mkdtempSync(join(tmpdir(), "agent-rishi-routes-"));
@@ -47,6 +60,11 @@ beforeEach(async () => {
     secrets: "memory",
     checkSetupOnStart: false,
     exec: fakeExec,
+    // The runner's detection, as setup displays it: Codex verified, Claude Code not installed.
+    detectProviders: async () => [
+      detected("codex", { level: "verified", verifiedAt: new Date().toISOString() }),
+      detected("claude", { installed: false, executablePath: null, loggedIn: null, level: null }),
+    ],
     userHome: join(home, "user"),
   });
 });

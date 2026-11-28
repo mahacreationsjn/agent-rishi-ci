@@ -321,6 +321,12 @@ const check = (
   ...c,
 });
 
+/** When the mock providers' real check passed: a few minutes ago. */
+const verified = {
+  level: "verified" as const,
+  verifiedAt: new Date(Date.now() - 4 * 60_000).toISOString(),
+};
+
 export const setupChecks: SetupCheck[] = [
   check({
     id: "claude",
@@ -328,7 +334,8 @@ export const setupChecks: SetupCheck[] = [
     version: "2.1.4",
     loggedIn: true,
     authMethod: "claude.ai",
-    message: "v2.1.4 · signed in (Max plan)",
+    ...verified,
+    message: "Signed in and verified",
   }),
   check({
     id: "codex",
@@ -336,6 +343,7 @@ export const setupChecks: SetupCheck[] = [
     state: "missing",
     version: "0.58.0",
     loggedIn: false,
+    level: "configured",
     message: "Installed (0.58.0) but not signed in",
     fix: { kind: "login", command: "codex login" },
   }),
@@ -344,9 +352,10 @@ export const setupChecks: SetupCheck[] = [
     label: "OpenCode",
     version: "2.2.7",
     loggedIn: true,
-    authMethod: "api key, oauth",
-    account: "Anthropic, OpenAI",
-    message: "Connected: Anthropic, OpenAI",
+    authMethod: "credentials",
+    account: "anthropic, openai",
+    ...verified,
+    message: "Signed in and verified",
   }),
   check({
     id: "cursor",
@@ -355,7 +364,8 @@ export const setupChecks: SetupCheck[] = [
     loggedIn: true,
     authMethod: "cursor",
     account: "hello@quantum-rishi.com",
-    message: "Signed in",
+    ...verified,
+    message: "Signed in and verified",
   }),
   check({
     id: "gemini",
@@ -364,7 +374,11 @@ export const setupChecks: SetupCheck[] = [
     loggedIn: true,
     authMethod: "oauth-personal",
     account: "hello@quantum-rishi.com",
-    message: "Signed in",
+    state: "warning",
+    level: "credential_found",
+    verifiedAt: null,
+    message: "Signed in, not verified yet",
+    fix: { kind: "login", command: "gemini" },
   }),
   check({
     id: "gh",

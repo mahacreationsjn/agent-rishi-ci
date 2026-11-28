@@ -137,6 +137,11 @@ export class ClaudeAdapter implements ProviderAdapter {
     return this.catalog.list();
   }
 
+  /** When the CLI last answered a models request or a session start, for the copy in use. */
+  verifiedAt(): number | undefined {
+    return this.freshness.confirmedAt(executableFingerprint(this.executable()));
+  }
+
   onModelsChanged(listener: () => void): () => void {
     return this.catalog.subscribe(listener);
   }

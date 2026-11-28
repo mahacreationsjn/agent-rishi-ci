@@ -140,6 +140,12 @@ export class CursorAdapter implements ProviderAdapter {
     return this.catalog.list();
   }
 
+  /** When the CLI last answered a models request or a session start, for the copy in use. */
+  verifiedAt(): number | undefined {
+    const exe = this.options.executable ?? this.found;
+    return exe ? this.freshness.confirmedAt(executableFingerprint(exe)) : undefined;
+  }
+
   onModelsChanged(listener: () => void): () => void {
     return this.catalog.subscribe(listener);
   }

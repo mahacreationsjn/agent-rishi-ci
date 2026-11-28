@@ -1,5 +1,6 @@
 import type {
   LoginCommandResponse,
+  ProviderStatus,
   SetupCheck,
   SetupStatus,
   SetupToolId,
@@ -9,29 +10,44 @@ import type { SettingsStore } from "../../settings-store";
 import { errorMessage } from "../errors";
 import type { Exec } from "../exec";
 import type { BrowserProbe } from "./browsers";
-import { CHECKS, type CheckEnv } from "./checks";
+import { base } from "./check-base";
+import { CHECKS, type CheckEnv, type ToolCheckId } from "./checks";
+import {
+  isProviderCheck,
+  PROVIDER_CHECKS,
+  type ProviderCheckId,
+  providerCheck,
+  terminalProgram,
+} from "./provider-checks";
+import {
+  type DetectProviders,
+  localProviderDetection,
+  PROVIDER_DETECT_TIMEOUT_MS,
+} from "./provider-detection";
 import { LOGIN_COMMANDS, type Locate, type LoginTool, loginCommandLine } from "./tool-lookup";
 
 export interface SetupServiceDeps {
   exec: Exec;
   settings: Pick<SettingsStore, "get" | "update">;
-  /** Per-check timeout (default 20s); a slow CLI never blocks the checklist. */
+  /** Per-check timeout for the other tools (default 20s); a slow CLI never blocks the checklist. */
   checkTimeoutMs?: number;
+  /**
+   * The agent providers' detection, each status with its level (Foundation §4.3): the runner's,
+   * which setup only displays (default: the same detection in this process, for `doctor`).
+   */
+  detectProviders?: DetectProviders;
+  /** How long the providers' detection may take, model lists included (default 90s). */
+  detectTimeoutMs?: number;
   /** Cached results are reused for this long unless a refresh is requested (default 5 min). */
   cacheMs?: number;
   platform?: NodeJS.Platform;
   nodeVersion?: string;
   browserProbe?: Partial<BrowserProbe>;
   now?: () => number;
-  /** Finds claude, codex and gh (default: PATH, then their known install locations). */
+  /** Finds gh (default: PATH, then its known install locations). */
   locate?: Locate;
-  /**
-   * The user's home folder, for known install locations and the CLIs' own settings (default:
-   * `os.homedir()`).
-   */
+  /** The user's home folder, for known install locations (default: `os.homedir()`). */
   userHome?: string;
-  /** Read for which login variables are set, never their values (default: `process.env`). */
-  env?: NodeJS.ProcessEnv;
   /**
    * Picks up PATH changes made since Agent Rishi started, before an explicit re-check (default:
    * the Windows registry's user and machine `Path`; nothing elsewhere).
@@ -39,10 +55,7 @@ export interface SetupServiceDeps {
   refreshPath?: () => Promise<unknown>;
   /** The setup terminal's shell, for sign-in commands (default: `defaultShell()`). */
   shell?: string;
-  /**
-   * Called after every completed check (not for cached results), e.g. so the runner re-detects
-   * its providers after an install or a login and refreshes their model lists.
-   */
+  /** Called after every completed check (not for cached results). */
   onChecked?: (status: SetupStatus) => void;
 }
 
@@ -58,15 +71,11 @@ const ORDER: SetupToolId[] = [
   "browser",
   "node",
 ];
-/** Agent providers: setup is ready when at least one is installed and signed in. */
-export const PROVIDER_CHECKS: readonly SetupToolId[] = [
-  "claude",
-  "codex",
-  "opencode",
-  "cursor",
-  "gemini",
-  "antigravity",
-];
+/** The other tools, checked here. */
+const TOOL_CHECKS = ORDER.filter((id): id is ToolCheckId => !isProviderCheck(id));
+
+/** Agent providers: setup is ready when at least one is `verified`. */
+export { PROVIDER_CHECKS };
 
 /**
  * First-run setup and re-checks on launch (§14). Runs every detection in parallel with a
@@ -111,7 +120,7 @@ export class SetupService {
    */
   loginCommand(tool: LoginTool): LoginCommandResponse {
     const check = this.cached?.checks.find((c) => c.id === tool);
-    const program = check?.installed ? check.executablePath : null;
+    const program = check?.installed ? terminalProgram(check.executablePath) : null;
     const args = LOGIN_COMMANDS[tool].slice(1);
     return { tool, command: loginCommandLine(tool, this.shell(), program), args };
   }
@@ -143,9 +152,13 @@ export class SetupService {
       now: this.now(),
       browserProbe: this.deps.browserProbe,
       ...(userHome ? { userHome } : {}),
-      ...(this.deps.env ? { env: this.deps.env } : {}),
     };
-    const checks = await Promise.all(ORDER.map((id) => this.timed(id, env)));
+    const [providers, tools] = await Promise.all([
+      this.providerRows(env),
+      Promise.all(TOOL_CHECKS.map((id) => this.timed(id, env))),
+    ]);
+    const found = new Map<SetupToolId, SetupCheck>([...providers, ...tools].map((c) => [c.id, c]));
+    const checks = ORDER.flatMap((id) => found.get(id) ?? []);
     const previous = this.cached;
     const warnings = checks
       .filter((c) => c.state === "warning" || this.regressed(previous, c))
@@ -153,9 +166,8 @@ export class SetupService {
     const status: SetupStatus = {
       checkedAt: new Date(this.now()).toISOString(),
       setupCompleted: this.deps.settings.get().setup.completed,
-      ready: checks.some(
-        (c) => PROVIDER_CHECKS.includes(c.id) && c.installed && c.loggedIn === true,
-      ),
+      // Only a verified provider is ready: a real check passed with its login (§4.3).
+      ready: checks.some((c) => isProviderCheck(c.id) && c.level === "verified"),
       checks,
       warnings,
     };
@@ -173,40 +185,59 @@ export class SetupService {
     return before?.state === "ok" && check.state === "missing";
   }
 
-  private async timed(id: SetupToolId, env: CheckEnv): Promise<SetupCheck> {
+  /**
+   * The providers' rows from the one detection: a row for each provider it reports. When the
+   * detection fails or times out, every provider row says so.
+   */
+  private async providerRows(env: CheckEnv): Promise<SetupCheck[]> {
     const started = this.now();
-    const timeoutMs = this.deps.checkTimeoutMs ?? 20_000;
-    let timer: NodeJS.Timeout | undefined;
+    let statuses: ProviderStatus[];
     try {
-      const result = await Promise.race([
-        CHECKS[id](env),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
-        }),
-      ]);
+      statuses = await withTimeout(
+        (this.deps.detectProviders ?? localProviderDetection)(),
+        this.deps.detectTimeoutMs ?? PROVIDER_DETECT_TIMEOUT_MS,
+      );
+    } catch (error) {
+      const durationMs = Math.max(0, this.now() - started);
+      return PROVIDER_CHECKS.map((id) => failedCheck(id, error, durationMs));
+    }
+    const durationMs = Math.max(0, this.now() - started);
+    return statuses.flatMap((status) => {
+      const id = status.providerId;
+      if (!isProviderCheck(id)) return [];
+      return [{ ...providerCheck(id as ProviderCheckId, status, env), durationMs }];
+    });
+  }
+
+  private async timed(id: ToolCheckId, env: CheckEnv): Promise<SetupCheck> {
+    const started = this.now();
+    try {
+      const result = await withTimeout(CHECKS[id](env), this.deps.checkTimeoutMs ?? 20_000);
       return { ...result, durationMs: Math.max(0, this.now() - started) };
     } catch (error) {
-      return {
-        id,
-        label: id,
-        state: "error",
-        installed: false,
-        version: null,
-        executablePath: null,
-        loggedIn: null,
-        authMethod: null,
-        account: null,
-        loginExpiresAt: null,
-        message: `Check failed: ${errorMessage(error)}`,
-        fix: null,
-        durationMs: Math.max(0, this.now() - started),
-      };
-    } finally {
-      clearTimeout(timer);
+      return failedCheck(id, error, Math.max(0, this.now() - started));
     }
   }
 
   private now(): number {
     return this.deps.now?.() ?? Date.now();
   }
+}
+
+/** A check that failed or timed out, with the reason. */
+function failedCheck(id: SetupToolId, error: unknown, durationMs: number): SetupCheck {
+  return {
+    ...base(id),
+    state: "error",
+    message: `Check failed: ${errorMessage(error)}`,
+    durationMs,
+  };
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }

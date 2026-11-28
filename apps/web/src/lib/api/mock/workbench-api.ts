@@ -113,13 +113,15 @@ export function workbenchApi(world: MockWorld): WorkbenchApi {
             ...check,
             state: "ok" as const,
             loggedIn: true,
-            message: "v0.58.0 · signed in with ChatGPT",
+            level: "verified" as const,
+            verifiedAt: new Date().toISOString(),
+            message: "Signed in and verified",
             fix: null,
           }
         : check,
     );
     const ready = checks.some(
-      (c) => world.snapshot.runner.providers.some((p) => p.id === c.id) && c.state === "ok",
+      (c) => world.snapshot.runner.providers.some((p) => p.id === c.id) && c.level === "verified",
     );
     return {
       checkedAt: new Date().toISOString(),

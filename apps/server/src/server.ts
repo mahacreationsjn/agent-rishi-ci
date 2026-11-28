@@ -50,6 +50,7 @@ import { ensureLocalOwner } from "./services/owner";
 import { SearchBackfill } from "./services/search/backfill";
 import { createSecretStore, MemorySecretStore, type SecretStore } from "./services/secrets";
 import { sessionWorkdir } from "./services/sessions/workdir";
+import type { DetectProviders } from "./services/setup/provider-detection";
 import type { Locate } from "./services/setup/tool-lookup";
 import type { UtilityService } from "./services/utility";
 import { VaultService } from "./services/vault/vault-service";
@@ -107,8 +108,13 @@ export interface StartServerOptions {
   utility?: UtilityService;
   /** Runs CLI tools (detection, git); injectable for tests. */
   exec?: Exec;
-  /** Finds claude, codex and gh for the setup checks; injectable for tests. */
+  /** Finds gh for the setup checks; injectable for tests. */
   locate?: Locate;
+  /**
+   * The agent providers' detection setup displays (default: the runner's); tests that fake
+   * CLIs give their own.
+   */
+  detectProviders?: DetectProviders;
   /**
    * Picks up PATH changes before a setup re-check (default: the Windows registry's `Path`).
    * Tests that pin PATH pass a no-op.
@@ -283,6 +289,7 @@ export async function startServer(opts: StartServerOptions): Promise<RunningServ
     vault,
     exec: opts.exec,
     locate: opts.locate,
+    detectProviders: opts.detectProviders,
     refreshPath: opts.refreshPath,
     utility: opts.utility,
     userHome: opts.userHome,

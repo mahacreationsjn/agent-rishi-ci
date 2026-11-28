@@ -14,6 +14,7 @@ export * from "./automations-sharing";
 export * from "./browser-api";
 export * from "./checks";
 export * from "./common";
+export * from "./connection-level";
 export * from "./content-security";
 export * from "./desktop";
 export * from "./edition";

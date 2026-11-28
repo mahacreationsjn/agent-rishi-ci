@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AutonomyLevel, Id, ProviderId, ReasoningEffort, Role, Timestamp } from "./common";
+import { ConnectionLevel } from "./connection-level";
 import { ApprovalDecider, ApprovalDecision } from "./items";
 
 /**
@@ -190,6 +191,17 @@ export const ProviderStatus = z.object({
   /** Copies that were found but do not run, skipped in favour of a working one (if any). */
   broken: z.array(BrokenExecutable).optional(),
   checkedAt: Timestamp,
+  /**
+   * How far the connection is known to work (`ConnectionLevel`, Foundation §4.3): `null` when
+   * the provider is not installed or its copy can't run. Set by the runner's detection (the
+   * registry's `detect()`); absent from a bare adapter `detect()` and from older runners.
+   */
+  level: ConnectionLevel.nullable().optional(),
+  /**
+   * When the real check behind `verified` last passed (a protocol handshake, or a models request
+   * that costs no tokens). Null or absent below `verified`.
+   */
+  verifiedAt: Timestamp.nullable().optional(),
 });
 export type ProviderStatus = z.infer<typeof ProviderStatus>;
 

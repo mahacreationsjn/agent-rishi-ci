@@ -6,6 +6,7 @@ export { ApprovalBroker, type ItemCtx } from "./approvals";
 export * from "./async-queue";
 export * from "./claude";
 export * from "./codex";
+export { ConnectionLevels, connectionLevel } from "./connection-level";
 export * from "./cursor";
 export { FakeProvider, type FakeProviderOptions } from "./fake/adapter";
 export { FakeSession } from "./fake/session";

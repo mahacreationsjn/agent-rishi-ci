@@ -93,18 +93,19 @@ export async function executeCommand(core: RunnerCore, command: RunnerCommand): 
       // since then are found, and agents and terminals started afterwards see them too.
       const added = await refreshProcessPath();
       if (added.length > 0) core.log?.(`PATH: picked up ${added.join(", ")}`);
-      const adapters = command.providerId
-        ? registry.list().filter((a) => a.id === command.providerId)
-        : registry.list();
-      const statuses = await Promise.all(adapters.map((a) => a.detect()));
+      const ids = command.providerId ? [command.providerId] : undefined;
+      // The one detection (Foundation §4.3): each status carries its level, `verified` only
+      // once a real check has passed with the login it found.
+      const statuses = await registry.detect(ids);
       // A periodic availability check (the factory) only wants to know who is signed in.
       if (command.refreshModels === false) return { statuses };
       // A re-detect (after an install or a login, or "Refresh models") also refreshes model
-      // lists; changes reach the server as a `providers` message as well.
-      const refreshed = registry.refreshModels(adapters.map((a) => a.id));
+      // lists; changes reach the server as a `providers` message as well. Listing the models is
+      // the real check, so the answer after it can say `verified`.
+      const refreshed = registry.refreshModels(ids);
       if (!command.waitForModels) return { statuses };
       await refreshed;
-      return { statuses, providers: registry.info() };
+      return { statuses: registry.withLevels(statuses), providers: registry.info() };
     }
     case "provider.models": {
       const adapter = registry.get(command.providerId);

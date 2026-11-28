@@ -50,8 +50,10 @@ The first screen checks, in parallel:
 - **OpenCode:** installed version (2.2 or newer) and the providers it's connected to. With none, only OpenCode's free models are available, and the row suggests `opencode auth login`.
 - **Cursor:** the Cursor CLI's version, that it has the ACP server Agent Rishi drives (`agent acp`; older builds need `agent update`), and its login (`agent login`).
 - **Gemini CLI:** its version (0.68 or newer) and its login, read from Gemini CLI's own settings and your environment. A Google login kept in your system keychain, or an API key in a `.env` file, can't be confirmed from outside, so it shows as a warning rather than an error.
-- **Antigravity CLI:** its version (1.5.12 or newer) and whether it is signed in (its sign-in file exists, or `GEMINI_API_KEY` is set).
+- **Antigravity CLI:** its version (1.5.12 or newer) and whether it is signed in (its sign-in file exists, its keyring entry is there, or `GEMINI_API_KEY` is set).
 - **GitHub CLI:** installed and signed in.
+
+The agent rows show the same detection that starts sessions, at one of three levels: **configured** (installed), **signed in, not verified yet** (a login or key was found), and **verified**, once the provider has answered a real check with that login: it lists its models, which uses no tokens. Only a verified provider counts as ready, and its row shows when the check passed. Claude Code is checked through Claude Code support, so **Continue** installs that first.
 - **git:** installed, with your identity set.
 - **Browser:** an installed Edge or Chrome.
 - **Node.js:** version 24 or newer.
