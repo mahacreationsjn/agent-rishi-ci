@@ -18,6 +18,8 @@ import type {
   BrowserTabResponse,
   BrowserTabsResponse,
   BrowserViewportSize,
+  CreateVaultGrantRequest,
+  CreateVaultItemRequest,
   DevServersResponse,
   GithubConnection,
   GithubIssueDetails,
@@ -33,6 +35,7 @@ import type {
   ImageEnginesResponse,
   ImageTestRequest,
   ImageTestResponse,
+  ImportVaultEnvResponse,
   LoadedAgentConfig,
   LocalSttStatus,
   McpServerDiffRequest,
@@ -61,7 +64,12 @@ import type {
   TriageIssueRequest,
   TriageIssueResult,
   TtsRequest,
+  UpdateVaultItemRequest,
   UserInputInit,
+  VaultAuditEntry,
+  VaultGrant,
+  VaultItem,
+  VaultStatus,
   VoiceListResponse,
   WhisperModelId,
 } from "@agent-rishi/contracts";
@@ -193,6 +201,20 @@ export interface SecretsApi {
   status(): Promise<SecretsStatus>;
   set(key: SecretKey, value: string): Promise<void>;
   remove(key: SecretKey): Promise<void>;
+}
+
+/** `/api/vault` (`docs/foundation.md` §3). Values go in, never out. */
+export interface VaultApi {
+  status(): Promise<VaultStatus>;
+  items(): Promise<VaultItem[]>;
+  create(req: CreateVaultItemRequest): Promise<VaultItem>;
+  update(id: string, req: UpdateVaultItemRequest): Promise<VaultItem>;
+  remove(id: string): Promise<void>;
+  importEnv(text: string): Promise<ImportVaultEnvResponse>;
+  grants(itemId?: string): Promise<VaultGrant[]>;
+  grant(req: CreateVaultGrantRequest): Promise<VaultGrant>;
+  revoke(grantId: string): Promise<void>;
+  audit(query?: { itemId?: string; limit?: number }): Promise<VaultAuditEntry[]>;
 }
 
 // ------------------------------------------------------------------ orchestration (§8)

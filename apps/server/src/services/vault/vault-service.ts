@@ -3,6 +3,7 @@ import {
   type CreateVaultGrantRequest,
   CreateVaultGrantRequest as CreateVaultGrantSchema,
   type CreateVaultItemRequest,
+  type ImportVaultEnvResponse,
   type LocalOwner,
   type UpdateVaultItemRequest,
   type VaultAuditAction,
@@ -29,6 +30,7 @@ import {
   seal,
   VaultSealError,
 } from "./crypto";
+import { parseEnvText } from "./env-import";
 import { redactEvent, sortValues } from "./redaction";
 
 /** Where and by whom a value is to be applied, matched against grants (§3.3). */
@@ -188,28 +190,72 @@ export class VaultService {
   }
 
   create(request: CreateVaultItemRequest): VaultItem {
+    const [item] = this.createAll([request], "item.created");
+    if (!item) throw new Error("unreachable: one request makes one item");
+    return item;
+  }
+
+  /**
+   * Save each `NAME=value` of a `.env` file as an `env-secret` item named after its variable,
+   * all at once. Lines left out, and variables the Vault already has, come back with why.
+   */
+  importEnv(text: string): ImportVaultEnvResponse {
+    this.readyKey();
+    const { entries, skipped } = parseEnvText(text);
+    const existing = new Set(
+      this.db
+        .select({ envName: vaultItems.envName })
+        .from(vaultItems)
+        .where(eq(vaultItems.kind, "env-secret"))
+        .all()
+        .map((r) => r.envName),
+    );
+    const fresh = entries.filter((e) => {
+      if (!existing.has(e.name)) return true;
+      skipped.push({ line: e.line, name: e.name, reason: "Already in the Vault" });
+      return false;
+    });
+    const created = this.createAll(
+      fresh.map((e) => ({ kind: "env-secret", name: e.name, envName: e.name, value: e.value })),
+      "item.imported",
+    );
+    return { created, skipped: skipped.sort((a, b) => a.line - b.line) };
+  }
+
+  /** Seal and store items in one transaction, each audited with `action`. */
+  private createAll(
+    requests: CreateVaultItemRequest[],
+    action: "item.created" | "item.imported",
+  ): VaultItem[] {
     const key = this.readyKey();
     const at = this.now();
-    const row: ItemRow = {
-      id: newId("vlt"),
-      kind: request.kind,
-      name: request.name,
-      owner: this.deps.owner.id,
-      scope: "personal",
-      provider: request.kind === "api-credential" ? request.provider : null,
-      envName: request.kind === "env-secret" ? request.envName : null,
-      sealed: "",
-      createdAt: at,
-      updatedAt: at,
-      lastUsedAt: null,
-    };
-    row.sealed = seal(key, request.value, itemContext(row));
-    this.db.transaction((tx) => {
-      tx.insert(vaultItems).values(row).run();
-      this.record(tx, "item.created", row, {});
+    const made = requests.map((request) => {
+      const row: ItemRow = {
+        id: newId("vlt"),
+        kind: request.kind,
+        name: request.name,
+        owner: this.deps.owner.id,
+        scope: "personal",
+        provider: request.kind === "api-credential" ? request.provider : null,
+        envName: request.kind === "env-secret" ? request.envName : null,
+        sealed: "",
+        createdAt: at,
+        updatedAt: at,
+        lastUsedAt: null,
+      };
+      row.sealed = seal(key, request.value, itemContext(row));
+      return { row, value: request.value };
     });
-    this.remember(row.id, request.value);
-    return this.toItem(row);
+    if (made.length === 0) return [];
+    this.db.transaction((tx) => {
+      for (const { row } of made) {
+        tx.insert(vaultItems).values(row).run();
+        this.record(tx, action, row, {});
+      }
+    });
+    for (const { row, value } of made) this.values.set(row.id, value);
+    this.sorted = sortValues(this.values.values());
+    return made.map(({ row }) => this.toItem(row));
   }
 
   update(id: string, request: UpdateVaultItemRequest): VaultItem {

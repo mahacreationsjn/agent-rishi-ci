@@ -13,6 +13,7 @@ import { configContents, configFiles, mcpServers } from "./fixtures/config";
 import { mockHooksApi } from "./hooks";
 import { mockLocalStt } from "./local-stt";
 import { mockSkillsApi } from "./skills";
+import { mockVault } from "./vault";
 import type { MockWorld } from "./world";
 
 const delay = <T>(value: T, ms = 120): Promise<T> =>
@@ -317,10 +318,10 @@ function mockSecrets(): SecretsApi {
 
 type FeatureApis = Pick<
   AgentRishiClient,
-  "browser" | "agentConfig" | "images" | "voice" | "secrets"
+  "browser" | "agentConfig" | "images" | "voice" | "secrets" | "vault"
 >;
 
-/** Browser, agent configuration, images, voice and secrets for the mock client. */
+/** Browser, agent configuration, images, voice, secrets and the Vault for the mock client. */
 export function mockFeatureApis(world: MockWorld): FeatureApis {
   return {
     browser: mockBrowserApi(),
@@ -328,5 +329,6 @@ export function mockFeatureApis(world: MockWorld): FeatureApis {
     images: mockImages(),
     voice: mockVoice(),
     secrets: mockSecrets(),
+    vault: mockVault(),
   };
 }

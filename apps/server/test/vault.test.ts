@@ -8,6 +8,7 @@ import { vaultItems } from "../src/db/schema";
 import { ensureLocalOwner } from "../src/services/owner";
 import { MemorySecretStore, type SecretStore } from "../src/services/secrets";
 import { newDataKey, open, seal, VaultSealError } from "../src/services/vault/crypto";
+import { parseEnvText } from "../src/services/vault/env-import";
 import { VaultService } from "../src/services/vault/vault-service";
 
 const KEY_VALUE = "sk-test-0123456789abcdefghij";
@@ -255,5 +256,56 @@ describe("Vault grants", () => {
       "grant.created",
       "item.created",
     ]);
+  });
+});
+
+describe("importing a .env file", () => {
+  const text = [
+    "# database",
+    "export DATABASE_URL=postgres://app:s3cretpass@db/app",
+    "API_TOKEN='tok-0123456789'  ",
+    String.raw`MULTI="line one\nline two"`,
+    "PLAIN=value-with-12345 # a comment",
+    "PIN=1234",
+    'OPEN="never closed',
+    "not a line",
+    "1BAD=xxxxxxxxxxxx",
+    "API_TOKEN=tok-again-0123456789",
+    "",
+  ].join("\n");
+
+  it("reads NAME=value lines, and says why it left others out without their values", () => {
+    const { entries, skipped } = parseEnvText(text);
+    expect(entries).toEqual([
+      { line: 2, name: "DATABASE_URL", value: "postgres://app:s3cretpass@db/app" },
+      { line: 3, name: "API_TOKEN", value: "tok-0123456789" },
+      { line: 4, name: "MULTI", value: "line one\nline two" },
+      { line: 5, name: "PLAIN", value: "value-with-12345" },
+    ]);
+    expect(skipped.map((s) => [s.line, s.name])).toEqual([
+      [6, "PIN"],
+      [7, "OPEN"],
+      [8, null],
+      [9, null],
+      [10, "API_TOKEN"],
+    ]);
+    expect(JSON.stringify(skipped)).not.toMatch(/1234|never closed|tok-again/);
+  });
+
+  it("saves them as env secrets in one go, skipping variables the Vault already has", async () => {
+    const { service } = await vault();
+    service.create({ kind: "env-secret", name: "Db", envName: "PLAIN", value: OTHER_VALUE });
+    const result = service.importEnv(text);
+    expect(result.created.map((i) => [i.kind, i.name])).toEqual([
+      ["env-secret", "DATABASE_URL"],
+      ["env-secret", "API_TOKEN"],
+      ["env-secret", "MULTI"],
+    ]);
+    expect(result.skipped.find((s) => s.name === "PLAIN")?.reason).toBe("Already in the Vault");
+    expect(JSON.stringify(result)).not.toContain("s3cretpass");
+    expect(service.knownValues()).toContain("tok-0123456789");
+    expect(service.audit({ limit: 10 }).filter((e) => e.action === "item.imported")).toHaveLength(
+      3,
+    );
   });
 });

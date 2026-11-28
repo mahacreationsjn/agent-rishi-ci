@@ -55,6 +55,7 @@ import {
   httpBrowserApi,
   httpImagesApi,
   httpSecretsApi,
+  httpVaultApi,
   httpVoiceApi,
 } from "./http-features";
 import { httpGithubApi, httpOrchestrationApi, httpSessionConflictApi } from "./http-orchestration";
@@ -201,6 +202,7 @@ export function createHttpClient(origin: string, opts: HttpClientOptions = {}): 
 
     updateSettings: (patch) => call("PATCH", "/settings", patch, (v) => Settings.parse(v)),
     secrets: httpSecretsApi(http),
+    vault: httpVaultApi(http),
     network: httpNetworkApi(http),
     auth: httpAuthApi(origin),
 

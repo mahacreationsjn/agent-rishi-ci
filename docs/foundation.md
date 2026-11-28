@@ -81,7 +81,7 @@ Payment cards are not stored.
 - Screenshots mask password fields and known values.
 - No tool returns a value to an agent.
 - **Audit.** Every use, grant, reveal and change is an event, without the value.
-- Import from a password manager's CSV export, with a reminder to delete the file afterwards.
+- Import from a `.env` file, and from a password manager's CSV export once `login` items exist (its rows are logins), each with a reminder to delete the file afterwards.
 
 Agent Rishi itself can read a value while it applies it, and a website keeps what is submitted to it; the Vault keeps values away from models, logs and transcripts, not from Agent Rishi or the destination.
 
@@ -99,8 +99,14 @@ Agent Rishi itself can read a value while it applies it, and a website keeps wha
 - **Grants** bound role, project, destination (`connection:<id>`, `origin:<scheme://host:port>`, `mcp:<name>`) and end time. A bound left empty means any. `VaultService.use` returns a value only when a grant matches, and records both uses and refusals (`vault_grant_needed`).
 - **Redaction.** Every event goes through the Vault's redactor before the event log stores it. Streamed chunks are checked at their edges too, so a value split across chunks is hidden. Session exports also hide Vault values. Values must be at least 8 characters, so hiding them doesn't blank ordinary words.
 - **API:** `/api/vault` (`status`, `items`, `grants`, `audit`). No route returns a value.
+- **Settings › Vault (F5b):**
+  - Add an API key or environment variable; rename it, replace its value, or delete it.
+  - Grant it by role, project and end time.
+  - Import a `.env` file (`POST /api/vault/import-env`). Each `NAME=value` becomes an `env-secret` named after it, all in one transaction. Lines left out, and variables already in the Vault, come back with the reason, never the value.
+  - See the Vault's activity.
+  - A locked or unavailable Vault says why and offers nothing to add.
 - **Still to come:**
-  - the Settings page and CSV import;
+  - CSV import from a password manager, with `login` items;
   - applying values to sessions (F6b, for API-key connections);
   - the Inbox request for an ungranted item;
   - redaction in the runner's own journal once values reach the runner;

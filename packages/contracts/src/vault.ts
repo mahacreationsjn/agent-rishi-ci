@@ -137,9 +137,28 @@ export const VaultStatus = z.strictObject({
 });
 export type VaultStatus = z.infer<typeof VaultStatus>;
 
+/** A `.env` file's text, to save each `NAME=value` in it as an `env-secret` item. */
+export const ImportVaultEnvRequest = z.strictObject({ text: z.string().min(1).max(200_000) });
+export type ImportVaultEnvRequest = z.infer<typeof ImportVaultEnvRequest>;
+
+/** A line that wasn't saved, and why; never its value. */
+export const VaultImportSkip = z.strictObject({
+  line: z.int().positive(),
+  name: z.string().nullable(),
+  reason: z.string(),
+});
+export type VaultImportSkip = z.infer<typeof VaultImportSkip>;
+
+export const ImportVaultEnvResponse = z.strictObject({
+  created: z.array(VaultItem),
+  skipped: z.array(VaultImportSkip),
+});
+export type ImportVaultEnvResponse = z.infer<typeof ImportVaultEnvResponse>;
+
 /** What an audit entry records (§3.4). */
 export const VaultAuditAction = z.enum([
   "item.created",
+  "item.imported",
   "item.renamed",
   "item.value_changed",
   "item.deleted",
