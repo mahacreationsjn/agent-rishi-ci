@@ -33,6 +33,7 @@ import {
   OrchestrationService,
 } from "./orchestration/orchestration-service";
 import type { AutomationPort, GithubPort } from "./orchestration/ports";
+import { ensureLocalOwner } from "./owner";
 import { ProjectService } from "./projects/project-service";
 import { ProjectRedetector } from "./projects/redetector";
 import { ProviderHistoryService } from "./providers/history";
@@ -67,6 +68,7 @@ import { type SelfUpdateHost, UpdateService, type Updates } from "./updates/serv
 import { billingFromSetup } from "./usage/billing";
 import { UsageService } from "./usage/usage-service";
 import { ProviderUtilityService, runnerOneShot, type UtilityService } from "./utility";
+import { VaultService } from "./vault/vault-service";
 import { LocalSttService, type LocalSttServiceDeps } from "./voice/local/local-stt-service";
 import { VoiceService } from "./voice/voice-service";
 import { WorkbenchService } from "./workbench/workbench-service";
@@ -89,6 +91,11 @@ export interface ServicesOptions {
    */
   sandboxes?: SandboxService;
   secrets: SecretStore;
+  /**
+   * The Vault, opened by the server. Without one a Vault over `secrets` is made but not opened,
+   * so it stays unavailable (tests that don't use it).
+   */
+  vault?: VaultService;
   exec?: Exec;
   /** Finds claude, codex and gh for the setup checks (tests fake it with `exec`). */
   locate?: Locate;
@@ -147,6 +154,8 @@ export interface AppServices {
   /** Execution backends and the sandboxes of projects whose sessions run in containers. */
   sandboxes: SandboxService;
   secrets: SecretStore;
+  /** Secrets agents use, applied for them (`docs/foundation.md` §3). */
+  vault: VaultService;
   utility: UtilityService;
   projects: ProjectService;
   /** Re-detects projects' git checkout and GitHub remote (§9): on demand, on start, after turns. */
@@ -456,6 +465,9 @@ export function createServices(opts: ServicesOptions): AppServices {
     runners,
     sandboxes,
     secrets: opts.secrets,
+    vault:
+      opts.vault ??
+      new VaultService({ db: opts.db, keys: opts.secrets, owner: ensureLocalOwner(opts.db) }),
     utility,
     projects,
     redetector,

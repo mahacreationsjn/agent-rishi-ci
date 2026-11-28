@@ -52,6 +52,7 @@ import { createSecretStore, MemorySecretStore, type SecretStore } from "./servic
 import { sessionWorkdir } from "./services/sessions/workdir";
 import type { Locate } from "./services/setup/tool-lookup";
 import type { UtilityService } from "./services/utility";
+import { VaultService } from "./services/vault/vault-service";
 import { SettingsStore } from "./settings-store";
 
 export interface StartServerOptions {
@@ -246,6 +247,17 @@ export async function startServer(opts: StartServerOptions): Promise<RunningServ
     opts.secrets === "memory"
       ? new MemorySecretStore()
       : (opts.secrets ?? (await createSecretStore(log)));
+  // A store the caller chose (tests, dev) may hold the Vault's key in memory; the OS keychain's
+  // in-memory fallback may not, since the key would be gone after a restart (§3.2).
+  const vault = new VaultService({
+    db: database.db,
+    keys: secrets,
+    owner,
+    allowMemoryKey: opts.secrets !== undefined,
+    log,
+  });
+  await vault.open();
+  store.setRedactor(vault.redactor());
   const builtin = opts.builtinProviders ?? process.env.AGENT_RISHI_BUILTIN_PROVIDERS !== "0";
   const exec = opts.exec ?? runTool;
   const sandboxes = new SandboxService({
@@ -268,6 +280,7 @@ export async function startServer(opts: StartServerOptions): Promise<RunningServ
     runners,
     sandboxes,
     secrets,
+    vault,
     exec: opts.exec,
     locate: opts.locate,
     refreshPath: opts.refreshPath,

@@ -36,6 +36,7 @@ import { artifactRoutes, fileRoutes, providerRoutes, secretRoutes, setupRoutes }
 import { updateRoutes } from "./updates";
 import { usageRoutes } from "./usage";
 import { errorResponse, queryOf } from "./validate";
+import { vaultRoutes } from "./vault";
 import { speechRoutes, voiceRoutes } from "./voice";
 import { utilityRoutes, workbenchRoutes } from "./workbench";
 
@@ -108,6 +109,7 @@ export function createApi(ctx: ApiContext) {
       .route("/artifacts", artifactRoutes(s))
       .route("/remote-image", remoteImageRoutes())
       .route("/secrets", secretRoutes(s))
+      .route("/vault", vaultRoutes(s))
       .route("/network", networkRoutes(ctx.network))
       .route("/auth", authRoutes(ctx.network))
       .route("/", fileRoutes(s))

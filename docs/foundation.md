@@ -85,6 +85,27 @@ Payment cards are not stored.
 
 Agent Rishi itself can read a value while it applies it, and a website keeps what is submitted to it; the Vault keeps values away from models, logs and transcripts, not from Agent Rishi or the destination.
 
+**Built (F5, core).**
+
+- **Contracts** in `packages/contracts/src/vault.ts`: items (`api-credential` with a provider slug, `env-secret` with a variable name), grants, status and audit entries. Only the requests that set a value carry one.
+- **Storage** (`apps/server/src/services/vault/`): the tables `vault_items`, `vault_grants`, `vault_audit` and `vault_meta`. They are not projections, so no value reaches the event log, and deleting an item removes its ciphertext. Values are sealed with AES-256-GCM, bound to item id, owner and kind. The data key is the keychain entry `vault.dataKey`, which `/api/secrets` never lists.
+- **Fail closed.** Three states:
+  - `ready`.
+  - `locked`: the key is missing, damaged or doesn't match the items' check value. Nothing is read, made or overwritten, and the key is never re-created while items remain. Items can still be renamed and deleted; deleting the last one starts an empty Vault.
+  - `unavailable`: no OS keychain. The in-memory fallback can't hold the key, because it would be lost on restart.
+
+  A value that doesn't open, for example one copied onto another item, marks only that item unreadable.
+- **Restoring a backup:** on the same computer, a restored database opens with the keychain's key. On another computer it is `locked`.
+- **Grants** bound role, project, destination (`connection:<id>`, `origin:<scheme://host:port>`, `mcp:<name>`) and end time. A bound left empty means any. `VaultService.use` returns a value only when a grant matches, and records both uses and refusals (`vault_grant_needed`).
+- **Redaction.** Every event goes through the Vault's redactor before the event log stores it. Streamed chunks are checked at their edges too, so a value split across chunks is hidden. Session exports also hide Vault values. Values must be at least 8 characters, so hiding them doesn't blank ordinary words.
+- **API:** `/api/vault` (`status`, `items`, `grants`, `audit`). No route returns a value.
+- **Still to come:**
+  - the Settings page and CSV import;
+  - applying values to sessions (F6b, for API-key connections);
+  - the Inbox request for an ungranted item;
+  - redaction in the runner's own journal once values reach the runner;
+  - `login` items.
+
 ## 4. Connections
 
 A **harness** runs an agent (Claude Code, Codex, OpenCode, Cursor, Gemini CLI, Antigravity CLI). A **connection** is the account it runs on: whose login or key, and who pays.
