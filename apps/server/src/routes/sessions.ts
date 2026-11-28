@@ -100,7 +100,8 @@ export function sessionRoutes(s: AppServices, installToken: string) {
       // The transcript as Markdown, secrets redacted, to copy or download and share (§13).
       .get("/:id/export", async (c) => {
         const body: SessionTranscriptExport = await exportSessionTranscript(s, c.req.param("id"), {
-          knownSecrets: [installToken],
+          // Vault values too: one may have been in a transcript before it was saved there.
+          knownSecrets: [installToken, ...s.vault.knownValues()],
         });
         return c.json(body);
       })

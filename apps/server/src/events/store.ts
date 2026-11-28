@@ -8,16 +8,28 @@ import type { ProjectionReader } from "./reducer/types";
 
 type Listener = (events: RawEventEnvelope[]) => void;
 
+/** Rewrites an event before it is stored: hides Vault values (`docs/foundation.md` §3.4). */
+export type EventRedactor = (event: NewEvent) => NewEvent;
+
 /**
  * Append-only event log (§6). `append` writes events, their projections and any derived
  * domain events in one transaction, then notifies subscribers (the UI WebSocket hub) after
  * commit. Listeners must not append synchronously (defer with `queueMicrotask`), so every
  * listener sees batches in seq order.
+ *
+ * Every event, derived ones included, goes through the redactor first, so what is stored,
+ * projected and sent is the same redacted event.
  */
 export class EventStore {
   private readonly listeners = new Set<Listener>();
+  private redact: EventRedactor = (event) => event;
 
   constructor(private readonly db: Db) {}
+
+  /** Set the redactor every later event goes through (the Vault's, once it is open). */
+  setRedactor(redact: EventRedactor): void {
+    this.redact = redact;
+  }
 
   /** Highest seq in the log (0 when empty). */
   headSeq(): number {
@@ -73,7 +85,7 @@ export class EventStore {
     const ts = new Date().toISOString();
     const stored = this.db.transaction((tx) => {
       const out: RawEventEnvelope[] = [];
-      for (const event of build(tx)) insertAndProject(tx, event, ts, out);
+      for (const event of build(tx)) insertAndProject(tx, event, ts, out, this.redact);
       extra?.(tx);
       return out;
     });
@@ -82,7 +94,14 @@ export class EventStore {
   }
 }
 
-function insertAndProject(tx: Tx, event: NewEvent, ts: string, out: RawEventEnvelope[]): void {
+function insertAndProject(
+  tx: Tx,
+  given: NewEvent,
+  ts: string,
+  out: RawEventEnvelope[],
+  redact: EventRedactor,
+): void {
+  const event = redact(given);
   const row = tx
     .insert(events)
     .values({ sessionId: event.sessionId, type: event.type, payload: event.payload, ts })
@@ -90,5 +109,7 @@ function insertAndProject(tx: Tx, event: NewEvent, ts: string, out: RawEventEnve
     .get();
   const envelope = { ...event, seq: row.seq, ts } as EventEnvelope;
   out.push(envelope);
-  for (const derived of applyProjection(tx, envelope)) insertAndProject(tx, derived, ts, out);
+  for (const derived of applyProjection(tx, envelope)) {
+    insertAndProject(tx, derived, ts, out, redact);
+  }
 }

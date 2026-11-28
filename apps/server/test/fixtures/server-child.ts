@@ -8,6 +8,7 @@ import { sampleSession } from "../helpers";
 
 const [home, token, prompt] = process.argv.slice(2) as [string, string, string];
 const server = await startServer({
+  secrets: "memory",
   port: 0,
   dataDir: home,
   token,

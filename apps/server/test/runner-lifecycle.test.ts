@@ -82,6 +82,7 @@ describe("runner lifecycle (real processes)", () => {
     expect(journaled.length).toBeGreaterThan(0);
 
     server = await startServer({
+      secrets: "memory",
       port: 0,
       dataDir: home,
       token: TOKEN,
@@ -125,6 +126,7 @@ describe("runner lifecycle (real processes)", () => {
       },
     });
     server = await startServer({
+      secrets: "memory",
       checkSetupOnStart: false,
       port: 0,
       dataDir: home,
@@ -165,6 +167,7 @@ describe("runner lifecycle (real processes)", () => {
     );
     const logs: string[] = [];
     server = await startServer({
+      secrets: "memory",
       checkSetupOnStart: false,
       port: 0,
       dataDir: home,
@@ -196,6 +199,7 @@ describe("runner lifecycle (real processes)", () => {
       env: { AGENT_RISHI_TEST_RUNNER_DELAY_MS: "2000" },
     };
     server = await startServer({
+      secrets: "memory",
       checkSetupOnStart: false,
       port: 0,
       dataDir: home,
@@ -222,6 +226,7 @@ describe("runner lifecycle (real processes)", () => {
     const home = newHome();
     const logs: string[] = [];
     server = await startServer({
+      secrets: "memory",
       checkSetupOnStart: false,
       port: 0,
       dataDir: home,

@@ -12,3 +12,4 @@ export * from "./schema-ownership";
 export * from "./schema-runners";
 export * from "./schema-search";
 export * from "./schema-usage";
+export * from "./schema-vault";

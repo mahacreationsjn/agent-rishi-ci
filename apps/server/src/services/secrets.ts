@@ -1,28 +1,37 @@
 import type { SecretKey } from "@agent-rishi/contracts";
 
 /**
+ * Keychain entries only Agent Rishi itself uses. They are not `SecretKey`s, so `/api/secrets`
+ * never lists, sets or deletes them. `vault.dataKey`: the key that seals Vault items.
+ */
+export type InternalSecretKey = "vault.dataKey";
+
+/** Every name the keychain store accepts. */
+export type StoredSecretKey = SecretKey | InternalSecretKey;
+
+/**
  * Secrets in the OS keychain (§6), e.g. an optional ElevenLabs key. Values never go to files,
  * logs or API responses.
  */
 export interface SecretStore {
   readonly backend: "keyring" | "memory";
-  get(key: SecretKey): Promise<string | null>;
-  set(key: SecretKey, value: string): Promise<void>;
-  delete(key: SecretKey): Promise<void>;
+  get(key: StoredSecretKey): Promise<string | null>;
+  set(key: StoredSecretKey, value: string): Promise<void>;
+  delete(key: StoredSecretKey): Promise<void>;
 }
 
 /** In-memory store for tests and machines without a usable keychain. */
 export class MemorySecretStore implements SecretStore {
   readonly backend = "memory" as const;
-  private readonly values = new Map<SecretKey, string>();
+  private readonly values = new Map<StoredSecretKey, string>();
 
-  async get(key: SecretKey): Promise<string | null> {
+  async get(key: StoredSecretKey): Promise<string | null> {
     return this.values.get(key) ?? null;
   }
-  async set(key: SecretKey, value: string): Promise<void> {
+  async set(key: StoredSecretKey, value: string): Promise<void> {
     this.values.set(key, value);
   }
-  async delete(key: SecretKey): Promise<void> {
+  async delete(key: StoredSecretKey): Promise<void> {
     this.values.delete(key);
   }
 }
@@ -43,13 +52,13 @@ export class KeyringSecretStore implements SecretStore {
     private readonly service = "agent-rishi",
   ) {}
 
-  async get(key: SecretKey): Promise<string | null> {
+  async get(key: StoredSecretKey): Promise<string | null> {
     return new this.Entry(this.service, key).getPassword();
   }
-  async set(key: SecretKey, value: string): Promise<void> {
+  async set(key: StoredSecretKey, value: string): Promise<void> {
     await new this.Entry(this.service, key).setPassword(value);
   }
-  async delete(key: SecretKey): Promise<void> {
+  async delete(key: StoredSecretKey): Promise<void> {
     await new this.Entry(this.service, key).deletePassword();
   }
 }
