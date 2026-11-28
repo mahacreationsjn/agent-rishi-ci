@@ -70,6 +70,7 @@ import type { FactoryApi } from "./factory-api";
 import type {
   AgentConfigApi,
   BrowserApi,
+  ConnectionsApi,
   GithubApi,
   ImagesApi,
   OrchestrationApi,
@@ -267,6 +268,8 @@ export interface AgentRishiClient {
   readonly secrets: SecretsApi;
   /** The Vault (`docs/foundation.md` §3): items, grants and audit. Values are never echoed back. */
   readonly vault: VaultApi;
+  /** API-key and OpenAI-compatible connections (`docs/foundation.md` §4). */
+  readonly connections: ConnectionsApi;
   /** Network access (§15.1): on/off, the password, signed-in devices. */
   readonly network: NetworkApi;
   /** Sign-in for remote devices (§15.1). */

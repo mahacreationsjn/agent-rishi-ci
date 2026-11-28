@@ -20,6 +20,7 @@ import { sessionSnapshot } from "../services/sessions/snapshot";
 import { agentConfigRoutes, sessionAgentConfigRoutes } from "./agent-config";
 import { automationRoutes, projectAutomationRoutes } from "./automations";
 import { browserRoutes, sessionBrowserRoutes } from "./browser";
+import { connectionRoutes } from "./connections";
 import { executionRoutes } from "./execution";
 import { factoryRoutes, projectFactoryRoutes } from "./factory";
 import { githubRoutes, projectGithubRoutes, prRoutes, sessionGithubRoutes } from "./github";
@@ -110,6 +111,7 @@ export function createApi(ctx: ApiContext) {
       .route("/remote-image", remoteImageRoutes())
       .route("/secrets", secretRoutes(s))
       .route("/vault", vaultRoutes(s))
+      .route("/connections", connectionRoutes(s))
       .route("/network", networkRoutes(ctx.network))
       .route("/auth", authRoutes(ctx.network))
       .route("/", fileRoutes(s))

@@ -161,6 +161,33 @@ Only **verified** shows as ready. Gemini CLI gets its model list before a sessio
 - **Gemini CLI** lists the account's models before any session, in a short session of its own with no prompt and no `authenticate`, and only when there is evidence of a login.
 - **Antigravity CLI on Linux:** its keyring entry is found through the Secret Service's item search (paths only, never the secret) and counts as `credential_found`; `verified` still needs the model listing to pass.
 
+**Built (F6b, part 1: connections and live model lists).**
+
+- **Contracts** in `packages/contracts/src/connections.ts`: `Connection` with provider, kind (`api-key` or `compatible`), base URL, Vault key, ownership, level, the last check and its models. The providers are `anthropic`, `openai`, `gemini`, `xai`, `sarvam-ai` and `openai-compatible`.
+- **Storage:** the `connections` table. A key is never stored there, only the id of the Vault item that holds it.
+- **Choosing a key** for a connection grants it for destination `connection:<id>` only. The grant shows in the Vault; removing it there stops the connection using the key. A key must be an API key for that connection's provider; an OpenAI-compatible server takes any API key, or none.
+- **The check** lists the connection's models from the provider, which costs no tokens (`services/connections/model-list.ts`):
+  - Anthropic: `GET /v1/models`, with `x-api-key`, paged.
+  - Gemini: `GET /v1beta/models`, with `x-goog-api-key`. Only models that generate content are kept.
+  - OpenAI, xAI and compatible servers: `GET /models`, with a bearer key, or no key for a local server.
+  - Sarvam AI: `GET https://api.sarvam.ai/v2/models`. V2 is its OpenAI-compatible API, and it takes `api-subscription-key` or a bearer key.
+
+  The key goes only in that request's header, to the address the owner set:
+  - redirects aren't followed;
+  - plain `http` carries a key only to this computer or a private network;
+  - changing the address withdraws the key's grant until the key is chosen again;
+  - only the connection's own grant counts, and it is checked before every page;
+  - answers are read up to 4 MB;
+  - model IDs that repeat the key are dropped;
+  - transport errors are reported in fixed words, never in their own text.
+
+  A check whose address or key changed while it ran is dropped. A passing list makes the connection `verified`, with the time. A refused key leaves it `credential_found`, a removed grant or key leaves it `configured`, and each says why; an error never contains the key. A server without a models endpoint keeps model IDs the owner adds by hand, and is verified later by a test call (F6c).
+- **API:** `/api/connections` (list, create, update, delete, `check`).
+- **Settings › Connections:** add a connection with a key from the Vault (or none for a local server), see its level, models and last check, add model IDs by hand, check it again, or remove it.
+- **Still to come:**
+  - F6b part 2: running sessions on a connection; the key goes to that session's process only, and a key-based Codex session gets its own private Codex home.
+  - F6c: the tool-call check that marks which models can run agents.
+
 ## 5. Capabilities and model profiles
 
 Each model is tagged with what it can do: `code-agent`, `reasoning`, `chat`, `indic`, `speech`, `image`, `video`, `utility`.

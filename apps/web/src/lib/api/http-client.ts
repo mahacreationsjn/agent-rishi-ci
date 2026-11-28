@@ -53,6 +53,7 @@ import { createFetcher } from "./http";
 import {
   httpAgentConfigApi,
   httpBrowserApi,
+  httpConnectionsApi,
   httpImagesApi,
   httpSecretsApi,
   httpVaultApi,
@@ -203,6 +204,7 @@ export function createHttpClient(origin: string, opts: HttpClientOptions = {}): 
     updateSettings: (patch) => call("PATCH", "/settings", patch, (v) => Settings.parse(v)),
     secrets: httpSecretsApi(http),
     vault: httpVaultApi(http),
+    connections: httpConnectionsApi(http),
     network: httpNetworkApi(http),
     auth: httpAuthApi(origin),
 

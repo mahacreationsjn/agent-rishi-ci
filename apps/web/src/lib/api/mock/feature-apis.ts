@@ -9,6 +9,7 @@ import type {
 import type { AgentRishiClient } from "../client";
 import type { AgentConfigApi, ImagesApi, SecretsApi, VoiceApi } from "../feature-apis";
 import { mockBrowserApi } from "./browser";
+import { mockConnections } from "./connections";
 import { configContents, configFiles, mcpServers } from "./fixtures/config";
 import { mockHooksApi } from "./hooks";
 import { mockLocalStt } from "./local-stt";
@@ -318,7 +319,7 @@ function mockSecrets(): SecretsApi {
 
 type FeatureApis = Pick<
   AgentRishiClient,
-  "browser" | "agentConfig" | "images" | "voice" | "secrets" | "vault"
+  "browser" | "agentConfig" | "images" | "voice" | "secrets" | "vault" | "connections"
 >;
 
 /** Browser, agent configuration, images, voice, secrets and the Vault for the mock client. */
@@ -330,5 +331,6 @@ export function mockFeatureApis(world: MockWorld): FeatureApis {
     voice: mockVoice(),
     secrets: mockSecrets(),
     vault: mockVault(),
+    connections: mockConnections(),
   };
 }

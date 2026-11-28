@@ -16,6 +16,7 @@ import { ArtifactService } from "./artifacts";
 import { AutomationService, type AutomationServiceDeps } from "./automations/automation-service";
 import { TriageSettler } from "./automations/triage-settle";
 import { BrowserService } from "./browser/browser-service";
+import { ConnectionService } from "./connections/connection-service";
 import { type Exec, runTool } from "./exec";
 import { type FactoryOptions, FactoryService } from "./factory/factory-service";
 import { type FactoryGithub, GithubFactoryPort } from "./factory/github-port";
@@ -91,6 +92,8 @@ export interface ServicesOptions {
    * so it stays unavailable (tests that don't use it).
    */
   vault?: VaultService;
+  /** Connections' model-listing transport (tests point it at a stub). */
+  connections?: { fetch?: typeof fetch };
   exec?: Exec;
   /** Finds gh for the setup checks (tests fake it with `exec`). */
   locate?: Locate;
@@ -156,6 +159,8 @@ export interface AppServices {
   secrets: SecretStore;
   /** Secrets agents use, applied for them (`docs/foundation.md` §3). */
   vault: VaultService;
+  /** API-key and OpenAI-compatible connections (`docs/foundation.md` §4). */
+  connections: ConnectionService;
   utility: UtilityService;
   projects: ProjectService;
   /** Re-detects projects' git checkout and GitHub remote (§9): on demand, on start, after turns. */
@@ -463,6 +468,8 @@ export function createServices(opts: ServicesOptions): AppServices {
     ...opts.unwatchedApprovals,
     log: opts.log,
   });
+  const owner = ensureLocalOwner(opts.db);
+  const vault = opts.vault ?? new VaultService({ db: opts.db, keys: opts.secrets, owner });
   const services: AppServices = {
     db: opts.db,
     store: opts.store,
@@ -472,9 +479,14 @@ export function createServices(opts: ServicesOptions): AppServices {
     runners,
     sandboxes,
     secrets: opts.secrets,
-    vault:
-      opts.vault ??
-      new VaultService({ db: opts.db, keys: opts.secrets, owner: ensureLocalOwner(opts.db) }),
+    vault,
+    connections: new ConnectionService({
+      db: opts.db,
+      vault,
+      owner,
+      fetch: opts.connections?.fetch,
+      log: opts.log,
+    }),
     utility,
     projects,
     redetector,
