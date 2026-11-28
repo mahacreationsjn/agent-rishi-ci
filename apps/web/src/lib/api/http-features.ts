@@ -10,6 +10,7 @@ import {
   BrowserOpenResponse,
   BrowserTabResponse,
   BrowserTabsResponse,
+  Connection,
   DevServersResponse,
   HookListResponse,
   HookWriteResponse,
@@ -36,6 +37,7 @@ import { openBrowserSocket } from "./browser-channel";
 import type {
   AgentConfigApi,
   BrowserApi,
+  ConnectionsApi,
   ImagesApi,
   SecretsApi,
   VaultApi,
@@ -173,6 +175,24 @@ export function httpVoiceApi(http: Fetcher): VoiceApi {
       http.call("DELETE", `/voice/local/models/${enc(id)}`, undefined, (v) =>
         LocalSttStatus.parse(v),
       ),
+  };
+}
+
+/** `/api/connections`. */
+export function httpConnectionsApi(http: Fetcher): ConnectionsApi {
+  const one = (v: unknown) => Connection.parse(v);
+  return {
+    list: () =>
+      http.get(
+        "/connections",
+        (v) => z.object({ connections: z.array(Connection) }).parse(v).connections,
+      ),
+    create: (req) => http.call("POST", "/connections", req, one),
+    update: (id, req) => http.call("PATCH", `/connections/${enc(id)}`, req, one),
+    async remove(id) {
+      await http.call("DELETE", `/connections/${enc(id)}`);
+    },
+    check: (id) => http.call("POST", `/connections/${enc(id)}/check`, undefined, one),
   };
 }
 

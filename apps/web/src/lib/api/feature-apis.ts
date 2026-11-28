@@ -18,6 +18,8 @@ import type {
   BrowserTabResponse,
   BrowserTabsResponse,
   BrowserViewportSize,
+  Connection,
+  CreateConnectionRequest,
   CreateVaultGrantRequest,
   CreateVaultItemRequest,
   DevServersResponse,
@@ -64,6 +66,7 @@ import type {
   TriageIssueRequest,
   TriageIssueResult,
   TtsRequest,
+  UpdateConnectionRequest,
   UpdateVaultItemRequest,
   UserInputInit,
   VaultAuditEntry,
@@ -201,6 +204,16 @@ export interface SecretsApi {
   status(): Promise<SecretsStatus>;
   set(key: SecretKey, value: string): Promise<void>;
   remove(key: SecretKey): Promise<void>;
+}
+
+/** `/api/connections` (`docs/foundation.md` §4): API-key and OpenAI-compatible connections. */
+export interface ConnectionsApi {
+  list(): Promise<Connection[]>;
+  create(req: CreateConnectionRequest): Promise<Connection>;
+  update(id: string, req: UpdateConnectionRequest): Promise<Connection>;
+  remove(id: string): Promise<void>;
+  /** List its models again; a passing list makes it verified. */
+  check(id: string): Promise<Connection>;
 }
 
 /** `/api/vault` (`docs/foundation.md` §3). Values go in, never out. */

@@ -144,6 +144,8 @@ export interface StartServerOptions {
    * background polling (default on unless `AGENT_RISHI_GITHUB_SYNC=0`).
    */
   github?: ServicesOptions["github"] & { sync?: boolean };
+  /** Connections' model-listing transport (tests). */
+  connections?: ServicesOptions["connections"];
   /** Automations (§10): clock, scheduler timings and file rescans for tests. */
   automations?: ServicesOptions["automations"];
   /** Factory loop (§10.1): tick interval, background ticking, a scripted GitHub for tests. */
@@ -287,6 +289,7 @@ export async function startServer(opts: StartServerOptions): Promise<RunningServ
     sandboxes,
     secrets,
     vault,
+    connections: opts.connections,
     exec: opts.exec,
     locate: opts.locate,
     detectProviders: opts.detectProviders,

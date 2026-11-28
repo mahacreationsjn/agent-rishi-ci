@@ -11,6 +11,7 @@ import {
   Keyboard,
   type LucideIcon,
   Mic,
+  Plug,
   Settings2,
   ShieldCheck,
   SlidersHorizontal,
@@ -19,6 +20,7 @@ import {
   Vault,
 } from "lucide-react";
 import type { ReactNode } from "react";
+import { ConnectionSettings } from "@/components/settings/sections-connections";
 import {
   AutonomySettings,
   GeneralSettings,
@@ -80,6 +82,12 @@ const SECTIONS: { id: string; label: string; icon: LucideIcon; render: () => Rea
   { id: "providers", label: "Providers", icon: Bot, render: () => <ProviderSettings /> },
   { id: "autonomy", label: "Autonomy", icon: ShieldCheck, render: () => <AutonomySettings /> },
   { id: "vault", label: "Vault", icon: Vault, render: () => <VaultSettings /> },
+  {
+    id: "connections",
+    label: "Connections",
+    icon: Plug,
+    render: () => <ConnectionSettings />,
+  },
   { id: "github", label: "GitHub", icon: GitPullRequest, render: () => <GithubSettings /> },
   { id: "voice", label: "Voice", icon: Mic, render: () => <VoiceSettings /> },
   { id: "images", label: "Image generation", icon: ImageIcon, render: () => <ImageSettings /> },
