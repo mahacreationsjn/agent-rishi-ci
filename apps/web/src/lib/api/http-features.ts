@@ -15,6 +15,7 @@ import {
   HookWriteResponse,
   ImageEnginesResponse,
   ImageTestResponse,
+  ImportVaultEnvResponse,
   LoadedAgentConfig,
   LocalSttStatus,
   McpServerListResponse,
@@ -24,10 +25,22 @@ import {
   SkillSwitchDiff,
   SkillSwitchResponse,
   SttResponse,
+  VaultAuditEntry,
+  VaultGrant,
+  VaultItem,
+  VaultStatus,
   VoiceListResponse,
 } from "@agent-rishi/contracts";
+import { z } from "zod";
 import { openBrowserSocket } from "./browser-channel";
-import type { AgentConfigApi, BrowserApi, ImagesApi, SecretsApi, VoiceApi } from "./feature-apis";
+import type {
+  AgentConfigApi,
+  BrowserApi,
+  ImagesApi,
+  SecretsApi,
+  VaultApi,
+  VoiceApi,
+} from "./feature-apis";
 import type { Fetcher } from "./http";
 
 const enc = encodeURIComponent;
@@ -159,6 +172,38 @@ export function httpVoiceApi(http: Fetcher): VoiceApi {
     deleteLocalModel: (id) =>
       http.call("DELETE", `/voice/local/models/${enc(id)}`, undefined, (v) =>
         LocalSttStatus.parse(v),
+      ),
+  };
+}
+
+/** `/api/vault`. */
+export function httpVaultApi(http: Fetcher): VaultApi {
+  const item = (v: unknown) => VaultItem.parse(v);
+  const grant = (v: unknown) => VaultGrant.parse(v);
+  return {
+    status: () => http.get("/vault/status", (v) => VaultStatus.parse(v)),
+    items: () =>
+      http.get("/vault/items", (v) => z.object({ items: z.array(VaultItem) }).parse(v).items),
+    create: (req) => http.call("POST", "/vault/items", req, item),
+    update: (id, req) => http.call("PATCH", `/vault/items/${enc(id)}`, req, item),
+    async remove(id) {
+      await http.call("DELETE", `/vault/items/${enc(id)}`);
+    },
+    importEnv: (text) =>
+      http.call("POST", "/vault/import-env", { text }, (v) => ImportVaultEnvResponse.parse(v)),
+    grants: (itemId) =>
+      http.get(
+        `/vault/grants${qs({ itemId })}`,
+        (v) => z.object({ grants: z.array(VaultGrant) }).parse(v).grants,
+      ),
+    grant: (req) => http.call("POST", "/vault/grants", req, grant),
+    async revoke(grantId) {
+      await http.call("DELETE", `/vault/grants/${enc(grantId)}`);
+    },
+    audit: (query = {}) =>
+      http.get(
+        `/vault/audit${qs(query)}`,
+        (v) => z.object({ entries: z.array(VaultAuditEntry) }).parse(v).entries,
       ),
   };
 }

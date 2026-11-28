@@ -1,6 +1,7 @@
 import {
   CreateVaultGrantRequest,
   CreateVaultItemRequest,
+  ImportVaultEnvRequest,
   UpdateVaultItemRequest,
   VaultAuditQuery,
   VaultItemId,
@@ -20,6 +21,9 @@ export function vaultRoutes(s: AppServices) {
     .get("/items", (c) => c.json({ items: s.vault.list() }))
     .post("/items", jsonBody(CreateVaultItemRequest), (c) =>
       c.json(s.vault.create(c.req.valid("json")), 201),
+    )
+    .post("/import-env", jsonBody(ImportVaultEnvRequest), (c) =>
+      c.json(s.vault.importEnv(c.req.valid("json").text)),
     )
     .get("/items/:id", (c) => c.json(s.vault.get(c.req.param("id"))))
     .patch("/items/:id", jsonBody(UpdateVaultItemRequest), (c) =>

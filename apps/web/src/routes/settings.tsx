@@ -16,6 +16,7 @@ import {
   SlidersHorizontal,
   Smartphone,
   Sparkles,
+  Vault,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import {
@@ -29,6 +30,7 @@ import { GithubSettings } from "@/components/settings/sections-github";
 import { ImageSettings } from "@/components/settings/sections-images";
 import { NotificationSettings } from "@/components/settings/sections-media";
 import { NetworkSettings } from "@/components/settings/sections-network";
+import { VaultSettings } from "@/components/settings/sections-vault";
 import { VoiceSettings } from "@/components/settings/sections-voice";
 import { SettingsSection } from "@/components/settings/settings-ui";
 import { UpdateCheck } from "@/components/settings/update-check";
@@ -77,6 +79,7 @@ const SECTIONS: { id: string; label: string; icon: LucideIcon; render: () => Rea
   { id: "general", label: "General", icon: Settings2, render: () => <GeneralSettings /> },
   { id: "providers", label: "Providers", icon: Bot, render: () => <ProviderSettings /> },
   { id: "autonomy", label: "Autonomy", icon: ShieldCheck, render: () => <AutonomySettings /> },
+  { id: "vault", label: "Vault", icon: Vault, render: () => <VaultSettings /> },
   { id: "github", label: "GitHub", icon: GitPullRequest, render: () => <GithubSettings /> },
   { id: "voice", label: "Voice", icon: Mic, render: () => <VoiceSettings /> },
   { id: "images", label: "Image generation", icon: ImageIcon, render: () => <ImageSettings /> },

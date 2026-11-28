@@ -74,6 +74,7 @@ import type {
   ImagesApi,
   OrchestrationApi,
   SecretsApi,
+  VaultApi,
   VoiceApi,
 } from "./feature-apis";
 import type { AuthApi, NetworkApi } from "./network-api";
@@ -264,6 +265,8 @@ export interface AgentRishiClient {
   updateSettings(patch: SettingsPatch): Promise<Settings>;
   /** OS keychain secrets (API keys). Values are never echoed back. */
   readonly secrets: SecretsApi;
+  /** The Vault (`docs/foundation.md` §3): items, grants and audit. Values are never echoed back. */
+  readonly vault: VaultApi;
   /** Network access (§15.1): on/off, the password, signed-in devices. */
   readonly network: NetworkApi;
   /** Sign-in for remote devices (§15.1). */
