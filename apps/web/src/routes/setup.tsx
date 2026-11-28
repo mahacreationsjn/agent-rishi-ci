@@ -14,7 +14,7 @@ import { Logo } from "@/components/shell/logo";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { useClient } from "@/lib/api";
-import { snapshotKey } from "@/lib/queries";
+import { snapshotKey, useRecheckSetup } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { stt, tts } from "@/lib/voice/engines";
 
@@ -79,17 +79,28 @@ export function SetupPage() {
   const navigate = useNavigate();
   const [step, setStep] = useState(0);
   const status = useSetupStatus();
+  // Ready: at least one provider is verified (a real check passed with its login).
   const ready = status.data?.ready ?? false;
   // Claude Code support installs when the user continues with Claude Code detected (§14).
-  const claudeInstalled = status.data?.checks.some((c) => c.id === "claude" && c.installed);
-  const sdk = useClaudeSdkStatus(claudeInstalled === true).data;
+  const claude = status.data?.checks.find((c) => c.id === "claude");
+  const claudeInstalled = claude?.installed === true;
+  const sdk = useClaudeSdkStatus(claudeInstalled).data;
   const installSdk = useInstallClaudeSdk();
+  const { mutate: checkAgain } = useRecheckSetup();
+  // Claude Code is checked through Claude Code support, so a signed-in Claude Code can't be
+  // verified before it is installed: continuing installs it, then checks again.
+  const claudeAwaitsSupport =
+    claude?.level === "credential_found" && sdk !== undefined && sdk.state !== "ready";
+  const canContinue = ready || claudeAwaitsSupport;
   const [waitingForSdk, setWaitingForSdk] = useState(false);
   useEffect(() => {
     if (!waitingForSdk || sdk?.state === "installing") return;
     setWaitingForSdk(false);
-    if (sdk?.state === "ready") setStep(1);
-  }, [waitingForSdk, sdk?.state]);
+    if (sdk?.state === "ready") {
+      checkAgain();
+      setStep(1);
+    }
+  }, [waitingForSdk, sdk?.state, checkAgain]);
   const next = async () => {
     if (
       step === 0 &&
@@ -97,8 +108,10 @@ export function SetupPage() {
       (sdk?.state === "missing" || sdk?.state === "installing")
     ) {
       const started = sdk.state === "missing" ? await installSdk() : sdk;
-      if (started?.state === "ready") setStep(1);
-      else if (started?.state === "installing") setWaitingForSdk(true);
+      if (started?.state === "ready") {
+        checkAgain();
+        setStep(1);
+      } else if (started?.state === "installing") setWaitingForSdk(true);
       return;
     }
     setStep(step + 1);
@@ -186,14 +199,17 @@ export function SetupPage() {
             Skip setup
           </Button>
           {step < 2 ? (
-            <Button disabled={(step === 0 && !ready) || waitingForSdk} onClick={() => void next()}>
+            <Button
+              disabled={(step === 0 && !canContinue) || waitingForSdk}
+              onClick={() => void next()}
+            >
               {waitingForSdk
                 ? "Installing Claude Code support…"
                 : step === 0 && claudeInstalled && sdk?.state === "failed"
                   ? "Continue anyway"
-                  : step === 1 || ready
+                  : step === 1 || canContinue
                     ? "Continue"
-                    : "Waiting for a provider…"}{" "}
+                    : "Waiting for a verified provider…"}{" "}
               {waitingForSdk ? <Loader2 className="animate-spin" /> : <ArrowRight />}
             </Button>
           ) : (

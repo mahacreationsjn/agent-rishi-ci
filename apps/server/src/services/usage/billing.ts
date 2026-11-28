@@ -1,5 +1,5 @@
 import type { BillingMode, SetupStatus } from "@agent-rishi/contracts";
-import { PROVIDER_CHECKS } from "../setup/setup-service";
+import { isProviderCheck } from "../setup/provider-checks";
 
 /**
  * How a login is paid for, from the auth method a CLI reports: API keys and console
@@ -20,13 +20,13 @@ export function billingFromAuthMethod(authMethod: string | null): BillingMode {
 
 /**
  * Billing mode per provider id from setup detection (`claude`, `codex`, `opencode`, `cursor`,
- * `gemini`, `antigravity`). OpenCode reports how its providers are connected (`api key`, `oauth`,
- * `environment`, `free`).
+ * `gemini`, `antigravity`), from the runner's detection that setup shows. OpenCode reports how its
+ * providers are connected (`credentials`, `environment`, `free`), which says nothing of billing.
  */
 export function billingFromSetup(status: SetupStatus): Record<string, BillingMode> {
   const out: Record<string, BillingMode> = {};
   for (const check of status.checks) {
-    if (PROVIDER_CHECKS.includes(check.id)) {
+    if (isProviderCheck(check.id)) {
       out[check.id] = check.loggedIn ? billingFromAuthMethod(check.authMethod) : "unknown";
     }
   }

@@ -1,74 +1,27 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import type { ProviderStatus } from "@agent-rishi/contracts";
 import type { ExecutableLookup } from "@agent-rishi/providers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Exec, ExecResult } from "../src/services/exec";
-import {
-  expiresWithin,
-  parseClaudeAuth,
-  parseCodexLogin,
-  parseGhAuthJson,
-  parseGhAuthText,
-  parseOpenCodeAuth,
-  parseVersion,
-} from "../src/services/setup/parse";
+import { parseGhAuthJson, parseGhAuthText, parseVersion } from "../src/services/setup/parse";
 import { SetupService, type SetupServiceDeps } from "../src/services/setup/setup-service";
 import { execLocate } from "../src/services/setup/tool-lookup";
 import { SettingsStore } from "../src/settings-store";
 import { removeTree } from "./support/remove-tree";
 
 const NOW = Date.parse("2026-11-07T10:00:00.000Z");
+const VERIFIED_AT = "2026-11-07T09:59:00.000Z";
 
 describe("detection parsers", () => {
   it("reads versions", () => {
     expect(parseVersion("2.1.318 (Claude Code)")).toBe("2.1.318");
-    expect(parseVersion("codex-cli 0.160.1")).toBe("0.160.1");
     expect(parseVersion("gh version 2.81.0 (2025-10-01)")).toBe("2.81.0");
     expect(parseVersion("nothing")).toBeNull();
   });
 
-  it("reads claude auth status JSON", () => {
-    const auth = parseClaudeAuth(
-      JSON.stringify({
-        loggedIn: true,
-        authMethod: "claude.ai",
-        loginExpiresAt: "2026-11-09T00:00:00Z",
-        email: "a@b.c",
-      }),
-    );
-    expect(auth).toEqual({
-      loggedIn: true,
-      authMethod: "claude.ai",
-      account: "a@b.c",
-      loginExpiresAt: "2026-11-09T00:00:00.000Z",
-    });
-    expect(parseClaudeAuth("not json")).toBeNull();
-    expect(expiresWithin(auth?.loginExpiresAt ?? null, 3, NOW)).toBe(true);
-    expect(expiresWithin("2026-12-01T00:00:00Z", 3, NOW)).toBe(false);
-  });
-
-  it("reads OpenCode's connected providers", () => {
-    expect(parseVersion("opencode v2.2.7")).toBe("2.2.7");
-    expect(
-      parseOpenCodeAuth(
-        JSON.stringify([
-          { id: "anthropic", name: "Anthropic", connections: [{ type: "key", label: "API key" }] },
-          { id: "google", name: "Google", connections: [{ type: "env", name: "GEMINI_API_KEY" }] },
-          { id: "zai", name: "Z.AI", connections: [] },
-        ]),
-      ),
-    ).toEqual({ providers: ["Anthropic", "Google"], authMethod: "api key, environment" });
-    expect(parseOpenCodeAuth("[]")).toEqual({ providers: [], authMethod: null });
-    expect(parseOpenCodeAuth("not json")).toBeNull();
-  });
-
-  it("reads codex and gh login state without capturing tokens", () => {
-    expect(parseCodexLogin(0, "Logged in using ChatGPT")).toEqual({
-      loggedIn: true,
-      authMethod: "ChatGPT",
-    });
-    expect(parseCodexLogin(1, "Not logged in")).toEqual({ loggedIn: false, authMethod: null });
+  it("reads gh login state without capturing tokens", () => {
     expect(
       parseGhAuthJson(
         '{"hosts":{"github.com":[{"state":"success","active":true,"login":"octo","tokenSource":"keyring"}]}}',
@@ -105,11 +58,8 @@ function fakeExec(table: Record<string, Partial<ExecResult>>, calls: string[] = 
 /** Fake look-up: a tool is found at `/bin/<name>` when the table answers its `--version`. */
 function fakeLocate(
   table: Record<string, Partial<ExecResult>>,
-  overrides: Record<string, ExecutableLookup> = {},
 ): (name: string) => Promise<ExecutableLookup> {
   return async (name) => {
-    const override = overrides[name];
-    if (override) return override;
     const hit = table[`${name} --version`];
     if (!hit || (hit.code ?? 0) !== 0) return { version: null, broken: [] };
     const version = /\d+\.\d+\.\d+/.exec(hit.stdout ?? "")?.[0] ?? null;
@@ -117,22 +67,54 @@ function fakeLocate(
   };
 }
 
-/** A service over fake CLIs, with no PATH refresh and a bash setup terminal. */
+/** What the runner's detection reports for a provider: installed and signed in by default. */
+function provider(providerId: string, over: Partial<ProviderStatus> = {}): ProviderStatus {
+  return {
+    providerId,
+    installed: true,
+    version: "1.0.0",
+    executablePath: `/bin/${providerId}`,
+    loggedIn: true,
+    authMethod: null,
+    account: null,
+    loginExpiresAt: null,
+    supported: true,
+    issues: [],
+    checkedAt: new Date(NOW).toISOString(),
+    level: "credential_found",
+    verifiedAt: null,
+    ...over,
+  };
+}
+
+const tools: Record<string, Partial<ExecResult>> = {
+  "git --version": { stdout: "git version 2.50.1" },
+  "git config --get user.name": { stdout: "Ada" },
+  "git config --get user.email": { stdout: "ada@example.com" },
+};
+
+/** A service over fake tools and a fixed provider detection, a bash setup terminal. */
 function service(
-  table: Record<string, Partial<ExecResult>>,
+  statuses: ProviderStatus[] | (() => Promise<ProviderStatus[]>),
   deps: Partial<SetupServiceDeps> & { calls?: string[] } = {},
 ): SetupService {
   const { calls, ...rest } = deps;
   return new SetupService({
-    exec: fakeExec(table, calls),
-    locate: fakeLocate(table),
+    exec: fakeExec(tools, calls),
+    locate: fakeLocate(tools),
+    detectProviders: typeof statuses === "function" ? statuses : async () => statuses,
     refreshPath: async () => undefined,
     shell: "/bin/bash",
     settings,
     platform: "linux",
+    now: () => NOW,
+    browserProbe: { exists: () => false },
     ...rest,
   });
 }
+
+const byId = async (setup: SetupService, refresh = false) =>
+  Object.fromEntries((await setup.status({ refresh })).checks.map((c) => [c.id, c]));
 
 let dir: string;
 let settings: SettingsStore;
@@ -144,58 +126,241 @@ beforeEach(() => {
 
 afterEach(() => removeTree(dir));
 
-const happy: Record<string, Partial<ExecResult>> = {
-  "claude --version": { stdout: "2.1.318 (Claude Code)" },
-  "claude auth status": {
-    stdout: JSON.stringify({
-      loggedIn: true,
-      authMethod: "claude.ai",
-      loginExpiresAt: "2026-11-08T00:00:00Z",
-    }),
-  },
-  "codex --version": { stdout: "codex-cli 0.160.1" },
-  "codex login status": { code: 1, stdout: "Not logged in" },
-  "git --version": { stdout: "git version 2.50.1" },
-  "git config --get user.name": { stdout: "Ada" },
-  "git config --get user.email": { stdout: "ada@example.com" },
-};
-
-describe("SetupService", () => {
-  it("runs every check, flags an expiring Claude login and reports readiness", async () => {
-    const setup = service(happy, {
-      nodeVersion: "v24.16.0",
-      now: () => NOW,
-      browserProbe: { exists: () => false },
-    });
+describe("provider rows: the runner's detection, with its level", () => {
+  it("shows only a verified provider as ready", async () => {
+    const setup = service([
+      provider("claude", { level: "verified", verifiedAt: VERIFIED_AT, account: "a@b.c" }),
+      provider("codex", { level: "credential_found" }),
+    ]);
     const status = await setup.status();
-    const by = Object.fromEntries(status.checks.map((c) => [c.id, c]));
-    expect(by.claude).toMatchObject({ state: "warning", loggedIn: true, version: "2.1.318" });
-    // Sign in runs the copy that was found, by its full path.
-    expect(by.claude?.fix?.command).toBe("/bin/claude auth login");
-    expect(by.codex).toMatchObject({ state: "missing", installed: true, loggedIn: false });
-    expect(by.gh).toMatchObject({ state: "missing", installed: false });
-    expect(by.git).toMatchObject({ state: "ok", account: "Ada <ada@example.com>" });
-    expect(by.node).toMatchObject({ state: "ok", version: "24.16.0" });
-    expect(by.browser?.state).toBe("warning");
+    const checks = Object.fromEntries(status.checks.map((c) => [c.id, c]));
+    expect(checks.claude).toMatchObject({
+      state: "ok",
+      level: "verified",
+      verifiedAt: VERIFIED_AT,
+      account: "a@b.c",
+      message: "Signed in and verified",
+      fix: null,
+    });
+    expect(checks.codex).toMatchObject({
+      state: "warning",
+      level: "credential_found",
+      verifiedAt: null,
+      message: "Signed in, not verified yet",
+      fix: { kind: "login", command: "/bin/codex login" },
+    });
+    expect(checks.codex?.detail).toContain("costs no tokens");
     expect(status.ready).toBe(true);
-    expect(status.warnings.map((w) => w.id)).toContain("claude");
-    expect(status.setupCompleted).toBe(false);
   });
 
-  it("caches results and re-checks on refresh", async () => {
+  it("is not ready while every provider is only signed in", async () => {
+    const status = await service([provider("gemini"), provider("antigravity")]).status();
+    const rows = status.checks.filter((c) => c.level !== undefined);
+    expect(rows.map((c) => [c.id, c.state])).toEqual([
+      ["gemini", "warning"],
+      ["antigravity", "warning"],
+    ]);
+    expect(status.ready).toBe(false);
+  });
+
+  it("never treats a status without a level (an older runner) as verified", async () => {
+    const { level: _level, verifiedAt: _at, ...old } = provider("claude");
+    const status = await service([old]).status();
+    expect(status.checks.find((c) => c.id === "claude")).toMatchObject({
+      level: "credential_found",
+      state: "warning",
+    });
+    expect(status.ready).toBe(false);
+  });
+
+  it("asks to sign in below credential found, with the found copy by its path", async () => {
+    const checks = await byId(
+      service([
+        provider("codex", {
+          loggedIn: false,
+          level: "configured",
+          issues: [{ code: "not_logged_in", message: "Codex is not logged in." }],
+        }),
+        provider("gemini", {
+          loggedIn: null,
+          level: "configured",
+          issues: [{ code: "detect_failed", message: "Could not confirm Gemini CLI's login." }],
+        }),
+      ]),
+    );
+    expect(checks.codex).toMatchObject({
+      state: "missing",
+      level: "configured",
+      message: "Not signed in to Codex",
+      detail: "Codex is not logged in.",
+      fix: { kind: "login", command: "/bin/codex login" },
+    });
+    expect(checks.gemini).toMatchObject({
+      state: "warning",
+      message: "Could not confirm the Gemini CLI login",
+      fix: { kind: "login", command: "/bin/gemini" },
+    });
+  });
+
+  it("reports not installed, broken and too old with the fix that applies", async () => {
+    const shim = "C:\\Users\\Ada\\AppData\\Roaming\\npm\\claude.cmd";
+    const checks = await byId(
+      service([
+        provider("claude", {
+          installed: false,
+          executablePath: null,
+          loggedIn: null,
+          level: null,
+          broken: [{ path: shim, reason: "points at a missing package" }],
+          issues: [
+            { code: "broken_install", message: `Claude Code is installed but broken: ${shim}` },
+          ],
+        }),
+        provider("cursor", {
+          installed: false,
+          executablePath: null,
+          loggedIn: null,
+          level: null,
+          issues: [{ code: "not_installed", message: "The Cursor CLI is not installed." }],
+        }),
+        provider("gemini", {
+          version: "0.36.0",
+          supported: false,
+          loggedIn: null,
+          level: null,
+          issues: [
+            {
+              code: "version_unsupported",
+              message: "Gemini CLI 0.36.0 is too old (needs 0.68.0+). Update it.",
+              fix: { kind: "upgrade", command: "npm install -g @google/gemini-cli@latest" },
+              minVersion: "0.68.0",
+            },
+          ],
+        }),
+      ]),
+    );
+    expect(checks.claude).toMatchObject({
+      state: "missing",
+      installed: false,
+      level: null,
+      message: `Claude Code is installed but broken: ${shim}`,
+      fix: { kind: "install", command: "npm install -g @anthropic-ai/claude-code" },
+    });
+    expect(checks.claude?.broken).toHaveLength(1);
+    expect(checks.cursor).toMatchObject({
+      state: "missing",
+      message: "Cursor is not installed",
+      fix: { kind: "install", url: "https://cursor.com/docs/cli/installation" },
+    });
+    expect(checks.gemini).toMatchObject({
+      state: "missing",
+      level: null,
+      message: "Gemini CLI 0.36.0 is too old (needs 0.68.0+). Update it.",
+      fix: { kind: "upgrade", command: "npm install -g @google/gemini-cli@latest" },
+    });
+  });
+
+  it("flags an expiring login and OpenCode's free models on a verified provider", async () => {
+    const verified = { level: "verified" as const, verifiedAt: VERIFIED_AT };
+    const checks = await byId(
+      service([
+        provider("claude", {
+          ...verified,
+          issues: [{ code: "login_expiring", message: "Claude Code login expires soon." }],
+        }),
+        provider("opencode", { ...verified, authMethod: "free" }),
+      ]),
+    );
+    expect(checks.claude).toMatchObject({
+      state: "warning",
+      level: "verified",
+      message: "Your Claude Code login expires soon; sign in again",
+      fix: { kind: "login", command: "/bin/claude auth login" },
+    });
+    expect(checks.opencode).toMatchObject({ state: "warning", level: "verified" });
+  });
+
+  it("shows only the providers detection reports, in setup's order", async () => {
+    const status = await service([
+      provider("antigravity"),
+      provider("fake"),
+      provider("claude"),
+    ]).status();
+    expect(status.checks.map((c) => c.id)).toEqual([
+      "claude",
+      "antigravity",
+      "gh",
+      "git",
+      "browser",
+      "node",
+    ]);
+  });
+
+  it("signs in with the found copy quoted for the shell, or by name for an npm script", async () => {
+    const native = "C:\\Users\\Ada Lovelace\\.local\\bin\\claude.exe";
+    const setup = service(
+      [
+        provider("claude", { executablePath: native }),
+        provider("codex", {
+          executablePath: "C:\\npm\\node_modules\\@openai\\codex\\bin\\codex.js",
+        }),
+      ],
+      { shell: "powershell.exe" },
+    );
+    const checks = await byId(setup);
+    expect(checks.claude?.fix?.command).toBe(`& '${native}' auth login`);
+    expect(setup.loginCommand("claude")).toEqual({
+      tool: "claude",
+      command: `& '${native}' auth login`,
+      args: ["auth", "login"],
+    });
+    expect(checks.codex?.fix?.command).toBe("codex login");
+    expect(setup.loginCommand("codex").command).toBe("codex login");
+  });
+
+  it("marks every provider row failed when detection fails or takes too long", async () => {
+    const failing = await byId(service(async () => Promise.reject(new Error("runner went away"))));
+    expect(failing.claude).toMatchObject({
+      state: "error",
+      label: "Claude Code",
+      message: "Check failed: runner went away",
+    });
+    expect(failing.antigravity?.state).toBe("error");
+    const slow = service(() => new Promise(() => {}), { detectTimeoutMs: 20 });
+    const status = await slow.status();
+    expect(status.checks.find((c) => c.id === "gemini")?.message).toMatch(/timed out/);
+    expect(status.ready).toBe(false);
+    // The other tools are still checked.
+    expect(status.checks.find((c) => c.id === "git")?.state).toBe("ok");
+  });
+});
+
+describe("SetupService", () => {
+  it("checks git, gh, Node.js and the browser itself", async () => {
+    const checks = await byId(service([], { nodeVersion: "v24.16.0" }));
+    expect(checks.gh).toMatchObject({ state: "missing", installed: false });
+    expect(checks.git).toMatchObject({ state: "ok", account: "Ada <ada@example.com>" });
+    expect(checks.node).toMatchObject({ state: "ok", version: "24.16.0" });
+    expect(checks.browser?.state).toBe("warning");
+  });
+
+  it("caches results and detects again on refresh", async () => {
+    const detect = vi.fn(async () => [provider("claude")]);
     const calls: string[] = [];
-    const setup = service(happy, { calls });
+    const setup = service(detect, { calls });
     await setup.status();
     const first = calls.length;
     await setup.status();
+    expect(detect).toHaveBeenCalledTimes(1);
     expect(calls.length).toBe(first);
     await setup.status({ refresh: true });
+    expect(detect).toHaveBeenCalledTimes(2);
     expect(calls.length).toBe(first * 2);
   });
 
   it("reports every completed check, but not cached results", async () => {
     const checked: string[] = [];
-    const setup = service(happy, {
+    const setup = service([provider("claude", { level: "verified", verifiedAt: VERIFIED_AT })], {
       onChecked: (status) => {
         checked.push(status.checkedAt);
         throw new Error("a failing listener does not fail the check");
@@ -208,228 +373,21 @@ describe("SetupService", () => {
     expect(checked).toHaveLength(2);
   });
 
-  it("times out slow checks instead of hanging", async () => {
+  it("times out a slow tool check instead of hanging", async () => {
     const slow: Exec = (command, args) =>
-      basename(command) === "claude" ? new Promise(() => {}) : fakeExec(happy)(command, args);
-    const setup = service(happy, { exec: slow, checkTimeoutMs: 50 });
-    const status = await setup.status();
-    expect(status.checks.find((c) => c.id === "claude")).toMatchObject({ state: "error" });
-    expect(status.ready).toBe(false);
-  });
-
-  it("checks OpenCode: version, providers, the free tier and OpenCode 1", async () => {
-    const run = async (extra: Record<string, Partial<ExecResult>>) => {
-      const calls: string[] = [];
-      const status = await service({ ...extra }, { calls }).status();
-      return { status, check: status.checks.find((c) => c.id === "opencode"), calls };
-    };
-    const connected = await run({
-      "opencode --version": { stdout: "opencode v2.2.7" },
-      "opencode auth list --standalone --format json": {
-        stdout: JSON.stringify([
-          { id: "openai", name: "OpenAI", connections: [{ type: "oauth", label: "OAuth" }] },
-        ]),
-      },
+      basename(command) === "git" ? new Promise(() => {}) : fakeExec(tools)(command, args);
+    const status = await service([], { exec: slow, checkTimeoutMs: 50 }).status();
+    expect(status.checks.find((c) => c.id === "git")).toMatchObject({
+      state: "error",
+      label: "git",
     });
-    expect(connected.check).toMatchObject({
-      label: "OpenCode",
-      state: "ok",
-      installed: true,
-      version: "2.2.7",
-      loggedIn: true,
-      authMethod: "oauth",
-      account: "OpenAI",
-    });
-    // Ready with only OpenCode signed in; detection never uses the user's background service.
-    expect(connected.status.ready).toBe(true);
-    expect(connected.calls).toContain("opencode auth list --standalone --format json");
-
-    const free = await run({
-      "opencode --version": { stdout: "opencode v2.2.7" },
-      "opencode auth list --standalone --format json": { stdout: "[]" },
-    });
-    expect(free.check).toMatchObject({ state: "warning", loggedIn: true, authMethod: "free" });
-    // Sign in runs the copy that was found, by its full path.
-    expect(free.check?.fix?.command).toBe("/bin/opencode auth login");
-
-    const v1 = await run({ "opencode --version": { stdout: "1.19.5" } });
-    expect(v1.check).toMatchObject({ state: "missing", installed: true, version: "1.19.5" });
-    expect(v1.check?.fix?.command).toBe("npm install -g @opencode/cli");
-
-    const missing = await run({});
-    expect(missing.check).toMatchObject({ state: "missing", installed: false });
-    expect(missing.check?.fix?.command).toBe("npm install -g @opencode/cli");
-  });
-
-  it("checks Cursor: a Cursor-versioned `agent`, its ACP server and its login", async () => {
-    const run = async (extra: Record<string, Partial<ExecResult>>) => {
-      const status = await service({ ...extra }).status();
-      return { status, check: status.checks.find((c) => c.id === "cursor") };
-    };
-    const version = { "agent --version": { stdout: "2026.10.22-abc1234" } };
-    const signedIn = await run({
-      ...version,
-      "agent acp --help": { stdout: "Start the ACP server" },
-      "agent status": { stdout: "✓ Logged in as dev@example.com" },
-    });
-    expect(signedIn.check).toMatchObject({
-      label: "Cursor",
-      state: "ok",
-      version: expect.stringMatching(/^2026\.10\.22/),
-      loggedIn: true,
-      account: "dev@example.com",
-    });
-    expect(signedIn.status.ready).toBe(true);
-
-    const signedOut = await run({
-      ...version,
-      "agent acp --help": { stdout: "Start the ACP server" },
-      "agent status": { stdout: "Not logged in", code: 1 },
-    });
-    expect(signedOut.check).toMatchObject({ state: "missing", loggedIn: false });
-    expect(signedOut.check?.fix).toEqual({ kind: "login", command: "/bin/agent login" });
-
-    // `agent status` reads only that a login was stored; when the CLI's own check asks for a
-    // login, so would every session (and Cursor's ACP sign-in would open the browser).
-    const stale = await run({
-      ...version,
-      "agent acp --help": { stdout: "Start the ACP server" },
-      "agent status": { stdout: "✓ Login successful!\nLogged in (unable to fetch user details)" },
-      "agent --list-models": {
-        stderr: "Error: Authentication required. Run 'agent login', pass --api-key/--auth-token.",
-        code: 1,
-      },
-    });
-    expect(stale.check).toMatchObject({ state: "missing", installed: true, loggedIn: false });
-    expect(stale.check?.message).toContain("sign in again");
-    expect(stale.check?.fix).toEqual({ kind: "login", command: "/bin/agent login" });
-
-    const old = await run({
-      ...version,
-      "agent acp --help": { stderr: "error: unknown command 'acp'", code: 1 },
-    });
-    expect(old.check).toMatchObject({ state: "missing", installed: true });
-    expect(old.check?.fix).toEqual({ kind: "upgrade", command: "/bin/agent update" });
-
-    // Another tool called `agent` is not Cursor's.
-    const other = await run({ "agent --version": { stdout: "agent 1.2.3" } });
-    expect(other.check).toMatchObject({ state: "missing", installed: false });
-    expect(other.check?.fix?.command).toBe("curl https://cursor.com/install -fsS | bash");
-  });
-
-  it("checks Gemini CLI: its version and the login in its own settings, never the credentials", async () => {
-    const home = mkdtempSync(join(tmpdir(), "agent-rishi-gemini-home-"));
-    mkdirSync(join(home, ".gemini"));
-    const settings = (selectedType: string) =>
-      writeFileSync(
-        join(home, ".gemini", "settings.json"),
-        JSON.stringify({ security: { auth: { selectedType } } }),
-      );
-    const run = async (version: string | null, env: NodeJS.ProcessEnv = {}) => {
-      const table: Record<string, Partial<ExecResult>> = version
-        ? { "gemini --version": { stdout: version } }
-        : {};
-      const status = await service(table, { userHome: home, env }).status();
-      return { status, check: status.checks.find((c) => c.id === "gemini") };
-    };
-
-    settings("oauth-personal");
-    writeFileSync(
-      join(home, ".gemini", "google_accounts.json"),
-      JSON.stringify({ active: "dev@example.com" }),
-    );
-    writeFileSync(join(home, ".gemini", "oauth_creds.json"), '{"refresh_token":"secret"}');
-    const signedIn = await run("0.68.0");
-    expect(signedIn.check).toMatchObject({
-      label: "Gemini CLI",
-      state: "ok",
-      version: "0.68.0",
-      loggedIn: true,
-      authMethod: "oauth-personal",
-      account: "dev@example.com",
-    });
-    expect(JSON.stringify(signedIn.check)).not.toContain("secret");
-    expect(signedIn.status.ready).toBe(true);
-
-    // An API key login without the key in Agent Rishi's environment can't be confirmed.
-    settings("gemini-api-key");
-    const unknown = await run("0.68.0");
-    expect(unknown.check).toMatchObject({ state: "warning", loggedIn: null });
-    expect(unknown.check?.fix).toEqual({ kind: "login", command: "/bin/gemini" });
-    expect((await run("0.68.0", { GEMINI_API_KEY: "k" })).check).toMatchObject({
-      state: "ok",
-      authMethod: "gemini-api-key",
-    });
-
-    rmSync(join(home, ".gemini"), { recursive: true });
-    const signedOut = await run("0.69.0-preview.1");
-    expect(signedOut.check).toMatchObject({ state: "missing", installed: true, loggedIn: false });
-
-    const old = await run("0.67.0");
-    expect(old.check).toMatchObject({
-      state: "missing",
-      installed: true,
-      version: "0.67.0",
-      message: "Gemini CLI 0.67.0 is too old (needs 0.68.0+)",
-    });
-    expect(old.check?.fix).toEqual({
-      kind: "upgrade",
-      command: "npm install -g @google/gemini-cli@latest",
-    });
-
-    const missing = await run(null);
-    expect(missing.check).toMatchObject({ state: "missing", installed: false });
-    expect(missing.check?.fix?.command).toBe("npm install -g @google/gemini-cli");
-  });
-
-  it("checks Antigravity CLI: its version and whether it is signed in, never the token", async () => {
-    const home = mkdtempSync(join(tmpdir(), "agent-rishi-agy-home-"));
-    const run = async (version: string | null, env: NodeJS.ProcessEnv = {}) => {
-      const table: Record<string, Partial<ExecResult>> = version
-        ? { "agy --version": { stdout: version } }
-        : {};
-      const status = await service(table, { userHome: home, env }).status();
-      return { status, check: status.checks.find((c) => c.id === "antigravity") };
-    };
-
-    const unknown = await run("1.5.18");
-    expect(unknown.check).toMatchObject({ state: "warning", installed: true, loggedIn: null });
-    expect(unknown.check?.fix).toEqual({ kind: "login", command: "/bin/agy acp --login" });
-    expect(unknown.status.warnings).toContainEqual({
-      id: "antigravity",
-      message: "Could not confirm the Antigravity CLI login",
-    });
-
-    mkdirSync(join(home, ".gemini", "antigravity-cli"), { recursive: true });
-    writeFileSync(join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token"), "secret");
-    const signedIn = await run("1.5.18");
-    expect(signedIn.check).toMatchObject({
-      label: "Antigravity CLI",
-      state: "ok",
-      version: "1.5.18",
-      loggedIn: true,
-      authMethod: "oauth-personal",
-    });
-    expect(JSON.stringify(signedIn.check)).not.toContain("secret");
-    expect(signedIn.status.ready).toBe(true);
-
-    const old = await run("1.4.0");
-    expect(old.check).toMatchObject({
-      state: "missing",
-      message: "Antigravity CLI 1.4.0 is too old (needs 1.5.12+)",
-    });
-    expect(old.check?.fix).toEqual({ kind: "upgrade", command: "agy update" });
-
-    const missing = await run(null);
-    expect(missing.check).toMatchObject({ state: "missing", installed: false });
-    expect(missing.check?.fix?.command).toContain("antigravity.google/cli/install");
   });
 
   it("persists completion in settings and hands out login commands", () => {
-    const setup = service({});
+    const setup = service([]);
     setup.complete();
     expect(new SettingsStore(join(dir, "settings.json")).get().setup.completed).toBe(true);
-    // Before a check found gh, the bare command is all there is.
+    // Before a check found the tool, the bare command is all there is.
     expect(setup.loginCommand("gh")).toMatchObject({
       command: "gh auth login --web --git-protocol https",
     });
@@ -439,93 +397,17 @@ describe("SetupService", () => {
       args: ["auth", "login"],
     });
   });
-});
-
-const BROKEN_SHIM = "C:\\Users\\Ada\\AppData\\Roaming\\npm\\claude.cmd";
-
-describe("installed but broken, and the resolved sign-in command", () => {
-  it("reports a broken install with its paths instead of a login error", async () => {
-    const broken: ExecutableLookup = {
-      version: null,
-      broken: [
-        {
-          path: BROKEN_SHIM,
-          reason: "points at a missing package",
-          target:
-            "C:\\Users\\Ada\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js",
-        },
-        { path: BROKEN_SHIM.replace(".cmd", ".ps1"), reason: "points at a missing package" },
-      ],
-    };
-    const calls: string[] = [];
-    const setup = service(happy, { calls, locate: fakeLocate(happy, { claude: broken }) });
-    const claude = (await setup.status()).checks.find((c) => c.id === "claude");
-    expect(claude).toMatchObject({ state: "missing", installed: false, loggedIn: null });
-    expect(claude?.message).toBe(
-      `Claude Code is installed but broken: \`${BROKEN_SHIM}\` points at a missing package (and 1 more). Reinstall it, or remove the leftover shim.`,
-    );
-    expect(claude?.broken).toHaveLength(2);
-    expect(claude?.fix?.kind).toBe("install");
-    // A broken copy is never asked for its login state.
-    expect(calls.some((c) => c.startsWith("claude auth"))).toBe(false);
-  });
-
-  it("keeps not installed for a tool that is nowhere", async () => {
-    const setup = service({ ...happy, "claude --version": { code: 1 } });
-    const claude = (await setup.status()).checks.find((c) => c.id === "claude");
-    expect(claude).toMatchObject({ state: "missing", message: "Claude Code is not installed" });
-    expect(claude?.broken).toBeUndefined();
-  });
-
-  it("explains an unreadable login state with the underlying error", async () => {
-    const setup = service({
-      ...happy,
-      "claude auth status": { code: 1, stderr: "Error: config is corrupt" },
-    });
-    const claude = (await setup.status()).checks.find((c) => c.id === "claude");
-    expect(claude).toMatchObject({
-      state: "warning",
-      installed: true,
-      message: "Could not read the Claude login state",
-    });
-    expect(claude?.detail).toContain("exited with code 1");
-    expect(claude?.detail).toContain("Error: config is corrupt");
-  });
-
-  it("signs in with the resolved copy, quoted for the terminal's shell", async () => {
-    const native = "C:\\Users\\Ada Lovelace\\.local\\bin\\claude.exe";
-    const found: ExecutableLookup = {
-      command: { kind: "native", path: native },
-      version: "2.1.319",
-      broken: [{ path: BROKEN_SHIM, reason: "points at a missing package" }],
-    };
-    const setup = service(happy, {
-      locate: fakeLocate(happy, { claude: found }),
-      shell: "powershell.exe",
-    });
-    const claude = (await setup.status()).checks.find((c) => c.id === "claude");
-    // The working native copy wins over the broken shim, which is still reported.
-    expect(claude).toMatchObject({ installed: true, version: "2.1.319", executablePath: native });
-    expect(claude?.broken).toHaveLength(1);
-    expect(claude?.fix?.command).toBe(`& '${native}' auth login`);
-    expect(setup.loginCommand("claude")).toEqual({
-      tool: "claude",
-      command: `& '${native}' auth login`,
-      args: ["auth", "login"],
-    });
-    expect(setup.loginCommand("codex").command).toBe("& '/bin/codex' login");
-  });
 
   it("looks tools up through an injected exec, so fake CLIs never reach real ones", async () => {
     const calls: string[] = [];
-    const locate = execLocate(fakeExec(happy, calls));
-    expect(await locate("claude")).toEqual({
-      command: { kind: "native", path: "/bin/claude" },
-      version: "2.1.318",
+    const locate = execLocate(fakeExec({ "gh --version": { stdout: "gh version 2.81.0" } }, calls));
+    expect(await locate("gh")).toEqual({
+      command: { kind: "native", path: "/bin/gh" },
+      version: "2.81.0",
       broken: [],
     });
-    expect(await locate("gh")).toEqual({ version: null, broken: [] });
-    expect(calls).toEqual(["claude --version", "gh --version"]);
+    expect(await locate("git")).toEqual({ version: null, broken: [] });
+    expect(calls).toEqual(["gh --version", "git --version"]);
   });
 
   it("picks up a PATH change on re-check, without a restart", async () => {
@@ -534,22 +416,22 @@ describe("installed but broken, and the resolved sign-in command", () => {
       path = ["/usr/bin", "/home/ada/.local/bin"];
     });
     const locate = async (name: string): Promise<ExecutableLookup> =>
-      name === "claude" && path.includes("/home/ada/.local/bin")
+      name === "gh" && path.includes("/home/ada/.local/bin")
         ? {
-            command: { kind: "native", path: "/home/ada/.local/bin/claude" },
-            version: "2.1.319",
+            command: { kind: "native", path: "/home/ada/.local/bin/gh" },
+            version: "2.81.0",
             broken: [],
           }
         : fakeLocate({})(name);
-    const setup = service(happy, { locate, refreshPath });
-    expect((await setup.status()).checks.find((c) => c.id === "claude")?.installed).toBe(false);
+    const setup = service([], { locate, refreshPath });
+    expect((await byId(setup)).gh?.installed).toBe(false);
     // A plain (cached or first) status leaves PATH alone; a re-check refreshes it first.
     expect(refreshPath).not.toHaveBeenCalled();
-    const after = await setup.status({ refresh: true });
+    const after = await byId(setup, true);
     expect(refreshPath).toHaveBeenCalledTimes(1);
-    expect(after.checks.find((c) => c.id === "claude")).toMatchObject({
+    expect(after.gh).toMatchObject({
       installed: true,
-      executablePath: "/home/ada/.local/bin/claude",
+      executablePath: "/home/ada/.local/bin/gh",
     });
   });
 });

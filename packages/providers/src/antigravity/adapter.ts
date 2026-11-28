@@ -157,6 +157,12 @@ export class AntigravityAdapter implements ProviderAdapter {
     return this.catalog.list();
   }
 
+  /** When the CLI last answered a models request or a session start, for the copy in use. */
+  verifiedAt(): number | undefined {
+    const exe = this.options.executable ?? this.found?.command;
+    return exe ? this.freshness.confirmedAt(executableFingerprint(exe)) : undefined;
+  }
+
   /** Antigravity CLI lists its models only in a session: Default stands in until one has. */
   onModelsChanged(listener: () => void): () => void {
     return this.catalog.subscribe(listener);

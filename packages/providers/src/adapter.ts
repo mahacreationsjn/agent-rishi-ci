@@ -38,6 +38,14 @@ export interface ProviderAdapter {
    */
   refreshModels?(opts?: RefreshModelsOptions): Promise<void>;
   /**
+   * When a real check last passed with the executable the adapter runs now (epoch ms): the
+   * provider answered a protocol handshake or a models request that costs no tokens, during
+   * `refreshModels` or a session start (Foundation §4.3). Undefined when none has since the
+   * runner started, or the executable changed since. Optional: without it the provider never
+   * reaches `verified`. Must not throw.
+   */
+  verifiedAt?(): number | undefined;
+  /**
    * The models for one project, with the project's own config (in `projectDir`, its main
    * checkout) included, kept per project; `refresh` asks the provider again. Present exactly
    * when `capabilities().projectModels`. Must not throw: problems come back as `warnings`.

@@ -26,4 +26,10 @@ export {
 } from "./detect";
 export { geminiExtensions, geminiToolFacts, readPlan } from "./extensions";
 export { fallbackGeminiModels, geminiModelInfos } from "./models";
-export { GEMINI_ACP_ARGS, type GeminiProbe, probeGemini } from "./probe";
+export {
+  GEMINI_ACP_ARGS,
+  type GeminiModelListing,
+  type GeminiProbe,
+  listGeminiModels,
+  probeGemini,
+} from "./probe";

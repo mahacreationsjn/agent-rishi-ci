@@ -1,4 +1,5 @@
 import type { SetupStatus } from "@agent-rishi/contracts";
+import { configureClaudeSdk } from "@agent-rishi/providers";
 import { homePaths } from "../../paths";
 import { SettingsStore } from "../../settings-store";
 import { type Exec, runTool } from "../exec";
@@ -7,10 +8,14 @@ import { SetupService } from "./setup-service";
 /**
  * Run the first-run detection checks (§14) outside a server, e.g. for `agent-rishi doctor`.
  * Reads the home's settings when they exist and never writes anything: a broken settings file
- * is left for the server, which keeps a copy and tells the user.
+ * is left for the server, which keeps a copy and tells the user. The agent providers are
+ * detected here the way the runner detects them, so Claude Code is checked through the Claude
+ * Code support installed in this home, as the runner does.
  */
 export async function checkSetup(opts: { home: string; exec?: Exec }): Promise<SetupStatus> {
-  const current = SettingsStore.read(homePaths(opts.home).settings);
+  const paths = homePaths(opts.home);
+  configureClaudeSdk({ depsDir: paths.deps });
+  const current = SettingsStore.read(paths.settings);
   const settings = { get: () => current, update: () => current };
   return new SetupService({ exec: opts.exec ?? runTool, settings }).status({ refresh: true });
 }

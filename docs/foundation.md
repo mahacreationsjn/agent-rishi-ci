@@ -126,6 +126,14 @@ Today the setup checklist and the runner's `detect()` are two separate implement
 
 Only **verified** shows as ready. Gemini CLI gets its model list before a session starts, as Antigravity CLI does.
 
+**Built (F6a).**
+
+- **Contracts:** `ConnectionLevel` (`configured`, `credential_found`, `verified`) in `packages/contracts/src/connection-level.ts`; `ProviderStatus` and `SetupCheck` carry `level` and `verifiedAt`.
+- **One detection:** the registry's `detect()` (`packages/providers/src/registry.ts`) runs each adapter's `detect()` and adds the level (`connection-level.ts`). The real check is the provider answering a models request or a session start, which costs no tokens; adapters report when it last passed for the installed copy (`verifiedAt()`), and a check made with a different login doesn't count. The runner's `provider.detect` answers with it; setup's provider rows only display that answer (`apps/server/src/services/setup/provider-checks.ts`), and the setup checks of their own are gone. `agent-rishi doctor`, and a server whose runner can't be reached, run the same detection in their own process.
+- **Ready:** setup is ready only when a provider is `verified`; a signed-in provider that hasn't passed the check shows "Signed in, not verified yet". Sessions still start on it, as before.
+- **Gemini CLI** lists the account's models before any session, in a short session of its own with no prompt and no `authenticate`, and only when there is evidence of a login.
+- **Antigravity CLI on Linux:** its keyring entry is found through the Secret Service's item search (paths only, never the secret) and counts as `credential_found`; `verified` still needs the model listing to pass.
+
 ## 5. Capabilities and model profiles
 
 Each model is tagged with what it can do: `code-agent`, `reasoning`, `chat`, `indic`, `speech`, `image`, `video`, `utility`.

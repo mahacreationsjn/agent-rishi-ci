@@ -112,6 +112,36 @@ function CheckDetails({ check }: { check: SetupCheck }) {
   );
 }
 
+/**
+ * An agent provider's level (Foundation §4.3): "verified" with the time its real check passed,
+ * or "not verified" while only its login was found. Only a verified provider counts as ready.
+ */
+function VerifiedTag({ check }: { check: SetupCheck }) {
+  if (check.level === "verified" && check.verifiedAt) {
+    const at = new Date(check.verifiedAt);
+    return (
+      <span
+        className="text-3xs font-normal text-status-done"
+        title={`A real check passed at ${at.toLocaleString()}`}
+        data-testid="verified-tag"
+      >
+        verified {at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+      </span>
+    );
+  }
+  if (check.level === "credential_found") {
+    return (
+      <span
+        className="text-3xs font-normal text-muted-foreground"
+        title="Its login was found, but no real check has passed with it yet"
+      >
+        not verified
+      </span>
+    );
+  }
+  return null;
+}
+
 /** Live setup status, shared by the checklist, the setup page and the model picker. */
 export { useSetupStatus };
 
@@ -174,6 +204,7 @@ export function SetupChecklist() {
                     {providerIds.has(id) ? (
                       <span className="text-3xs font-normal text-muted-foreground">provider</span>
                     ) : null}
+                    {c && state !== "checking" ? <VerifiedTag check={c} /> : null}
                   </div>
                   <div
                     className={cn(
@@ -221,7 +252,8 @@ export function SetupChecklist() {
       <div className="mt-2 flex items-start gap-3">
         <p className="flex-1 text-2xs text-muted-foreground">
           Agent Rishi reuses your existing logins and never stores provider or GitHub credentials.
-          At least one agent provider is required; GitHub is recommended.
+          At least one agent provider is required, verified by a check that costs no tokens; GitHub
+          is recommended.
         </p>
         <Button
           size="xs"

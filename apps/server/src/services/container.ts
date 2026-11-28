@@ -36,13 +36,7 @@ import type { AutomationPort, GithubPort } from "./orchestration/ports";
 import { ProjectService } from "./projects/project-service";
 import { ProjectRedetector } from "./projects/redetector";
 import { ProviderHistoryService } from "./providers/history";
-import {
-  isRemoteRunner,
-  type RunnerPort,
-  type RunnerRouter,
-  redetectProviders,
-  singleRunner,
-} from "./runner-port";
+import { isRemoteRunner, type RunnerPort, type RunnerRouter, singleRunner } from "./runner-port";
 import type { SecretStore } from "./secrets";
 import { AutoRetry, type AutoRetryDeps } from "./sessions/auto-retry";
 import { ChecksLoop } from "./sessions/checks-loop";
@@ -59,6 +53,7 @@ import { SessionService } from "./sessions/session-service";
 import { UnwatchedApprovals, type UnwatchedApprovalsDeps } from "./sessions/unwatched-approvals";
 import { WorktreeCleanup, type WorktreeCleanupDeps } from "./sessions/worktree-cleanup";
 import { ClaudeSdkService } from "./setup/claude-sdk";
+import { type DetectProviders, runnerProviderDetection } from "./setup/provider-detection";
 import { SetupService } from "./setup/setup-service";
 import { execLocate, type Locate } from "./setup/tool-lookup";
 import { DesktopUpdateService } from "./updates/desktop";
@@ -90,8 +85,13 @@ export interface ServicesOptions {
   sandboxes?: SandboxService;
   secrets: SecretStore;
   exec?: Exec;
-  /** Finds claude, codex and gh for the setup checks (tests fake it with `exec`). */
+  /** Finds gh for the setup checks (tests fake it with `exec`). */
   locate?: Locate;
+  /**
+   * The agent providers' detection setup displays (default: the runner's `provider.detect`);
+   * tests that fake CLIs give their own.
+   */
+  detectProviders?: DetectProviders;
   /** Picks up PATH changes before a setup re-check (tests that pin PATH pass a no-op). */
   refreshPath?: () => Promise<unknown>;
   utility?: UtilityService;
@@ -353,8 +353,15 @@ export function createServices(opts: ServicesOptions): AppServices {
     locate: opts.locate ?? (opts.exec ? execLocate(opts.exec) : undefined),
     refreshPath: opts.refreshPath,
     userHome,
-    // After an install or a login is re-checked, the runner's model lists follow.
-    onChecked: () => redetectProviders(opts.runner, opts.log),
+    // The providers' rows show the runner's detection (Foundation §4.3), which also refreshes
+    // their model lists. Tests that fake every CLI with `exec` see no provider unless they
+    // bring their own detection, and never wait for a runner.
+    detectProviders:
+      opts.detectProviders ??
+      runnerProviderDetection(
+        opts.runner,
+        opts.exec ? { fallback: async () => [], waitMs: 0 } : {},
+      ),
   });
   const claudeSdk = new ClaudeSdkService({ depsDir: opts.paths.deps, log: opts.log });
   const localStt = new LocalSttService({

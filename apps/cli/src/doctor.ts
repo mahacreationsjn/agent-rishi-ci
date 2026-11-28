@@ -157,7 +157,7 @@ export async function doctor(
   for (const warning of status.warnings) console.log(`\nWarning: ${warning.message}`);
   if (!status.ready) {
     console.log(
-      "\nInstall and sign in to Claude Code, Codex or OpenCode: at least one agent provider is required.",
+      "\nAt least one agent provider must be verified: installed, signed in, and answering a check that uses no tokens.",
     );
   }
   const node = status.checks.find((c) => c.id === "node");

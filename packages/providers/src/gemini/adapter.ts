@@ -9,12 +9,19 @@ import { classifyAcpError } from "../acp/errors";
 import type { AcpAgentSpec } from "../acp/extensions";
 import type { AcpInitializeResult, AcpSessionSetup } from "../acp/protocol";
 import { AcpSession } from "../acp/session";
-import { type ProviderAdapter, type ProviderSession, ProviderSessionError } from "../adapter";
+import {
+  type ProviderAdapter,
+  type ProviderSession,
+  ProviderSessionError,
+  type RefreshModelsOptions,
+} from "../adapter";
+import { executableFingerprint, ModelFreshness } from "../freshness";
 import { ModelCatalog } from "../models";
 import type { ResolvedCommand } from "../util/exec";
 import { findExecutable, type LocateOptions } from "../util/locate";
 import { geminiSessionArgs, writeGeminiAdminPolicies } from "./admin-policy";
 import { geminiAllowListNotice } from "./allow-list";
+import { type GeminiAuth, readGeminiAuth } from "./auth";
 import {
   detectGemini,
   GEMINI_MIN_VERSION,
@@ -24,7 +31,7 @@ import {
 } from "./detect";
 import { geminiExtensions } from "./extensions";
 import { fallbackGeminiModels, geminiModelInfos } from "./models";
-import { GEMINI_ACP_ARGS, type GeminiProbe, probeGemini } from "./probe";
+import { GEMINI_ACP_ARGS, type GeminiProbe, listGeminiModels, probeGemini } from "./probe";
 
 export const GEMINI_PROVIDER_ID = "gemini";
 
@@ -79,6 +86,8 @@ export interface GeminiAdapterOptions {
   locate?: LocateOptions;
   /** Max time for a probe (detection). */
   probeTimeoutMs?: number;
+  /** Reads the login (default `readGeminiAuth()`: the user's Gemini folder and environment). */
+  auth?: () => GeminiAuth;
   startTimeoutMs?: number;
   interruptTimeoutMs?: number;
 }
@@ -92,6 +101,9 @@ export class GeminiAdapter implements ProviderAdapter {
   /** Whether the last session listed a `plan` mode; unknown until one has. */
   private planListed: boolean | undefined;
   private found: { command: ResolvedCommand; version: string | null } | undefined;
+  private readonly freshness = new ModelFreshness();
+  /** The model listing under way, so concurrent refreshes share one CLI start. */
+  private listing: Promise<void> | undefined;
 
   constructor(private readonly options: GeminiAdapterOptions = {}) {}
 
@@ -117,6 +129,7 @@ export class GeminiAdapter implements ProviderAdapter {
       ...(this.options.locate ? { locate: this.options.locate } : {}),
       ...(this.options.probeTimeoutMs ? { timeoutMs: this.options.probeTimeoutMs } : {}),
       probe: (exe, version) => this.probe(exe, version),
+      ...(this.options.auth ? { auth: this.options.auth } : {}),
     });
     return status;
   }
@@ -141,12 +154,52 @@ export class GeminiAdapter implements ProviderAdapter {
     return this.catalog.list();
   }
 
-  /**
-   * Gemini CLI lists its models only in a session (`models.availableModels`), so there is no
-   * `refreshModels`: its aliases stand in until a session reports the account's list.
-   */
+  /** When the CLI last listed the account's models (a listing or a session), for the copy in use. */
+  verifiedAt(): number | undefined {
+    const exe = this.options.executable ?? this.found?.command;
+    return exe ? this.freshness.confirmedAt(executableFingerprint(exe)) : undefined;
+  }
+
+  /** Gemini CLI's aliases stand in until a listing or a session reports the account's list. */
   onModelsChanged(listener: () => void): () => void {
     return this.catalog.subscribe(listener);
+  }
+
+  /**
+   * Ask the CLI for the account's models before any session: it lists them only in a session,
+   * so a short-lived one is opened just for that (`listGeminiModels`: no prompt, no model call).
+   * Skipped without evidence of a login (a signed-out CLI could start a sign-in), on a version
+   * Agent Rishi doesn't run, and (with `maxAgeMs`) while the list is recent and `gemini` has not
+   * changed. Never throws.
+   */
+  async refreshModels(opts: RefreshModelsOptions = {}): Promise<void> {
+    let found: { command: ResolvedCommand; version: string | null };
+    try {
+      found = await this.executable();
+    } catch {
+      return;
+    }
+    const { command, version } = found;
+    if (version && !isSupportedGeminiVersion(version)) return;
+    if ((this.options.auth ?? (() => readGeminiAuth()))().loggedIn !== true) return;
+    if (
+      opts.maxAgeMs !== undefined &&
+      !this.listing &&
+      this.freshness.isFresh(executableFingerprint(command), opts.maxAgeMs)
+    ) {
+      return;
+    }
+    this.listing ??= this.listModels(command).finally(() => {
+      this.listing = undefined;
+    });
+    await this.listing;
+  }
+
+  private async listModels(command: ResolvedCommand): Promise<void> {
+    const listed = await listGeminiModels(command, {
+      ...(this.options.startTimeoutMs ? { timeoutMs: this.options.startTimeoutMs } : {}),
+    });
+    if (listed.info && listed.setup) this.onSetup(listed.setup, listed.info, command);
   }
 
   async openSession(opts: SessionOptions): Promise<ProviderSession> {
@@ -164,7 +217,7 @@ export class GeminiAdapter implements ProviderAdapter {
     const session = new AcpSession(opts, {
       executable: command,
       spec: { ...GEMINI_AGENT, args: geminiSessionArgs(GEMINI_AGENT.args, policies) },
-      onSetup: (setup, info) => this.onSetup(setup, info),
+      onSetup: (setup, info) => this.onSetup(setup, info, command),
       ...(this.options.startTimeoutMs ? { startTimeoutMs: this.options.startTimeoutMs } : {}),
       ...(this.options.interruptTimeoutMs
         ? { interruptTimeoutMs: this.options.interruptTimeoutMs }
@@ -180,12 +233,15 @@ export class GeminiAdapter implements ProviderAdapter {
   }
 
   /** A session reported its models and modes: they are the account's current ones. */
-  private onSetup(setup: AcpSessionSetup, info: AcpInitializeResult): void {
+  private onSetup(setup: AcpSessionSetup, info: AcpInitializeResult, from: ResolvedCommand): void {
     this.info = info;
     const modes = modeIds(setup);
     if (modes.length) this.planListed = modes.includes(GEMINI_AGENT.modes.plan ?? "plan");
     const reported = modelsOf(setup);
-    if (reported?.models.length) this.catalog.set(geminiModelInfos(reported.models));
+    if (reported?.models.length) {
+      this.freshness.confirm(executableFingerprint(from));
+      this.catalog.set(geminiModelInfos(reported.models));
+    }
   }
 
   /** Detection found a supported copy: sessions run it, after the handshake shows its flags. */

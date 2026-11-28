@@ -11,6 +11,7 @@ import {
   Role,
   Timestamp,
 } from "./common";
+import { ConnectionLevel } from "./connection-level";
 import { InboxItem, InboxItemKind, InboxItemStatus } from "./entities/inbox";
 import { GitHubRepo, Project } from "./entities/project";
 import { ItemRecord, Session, SessionStatus, Thread, Turn } from "./entities/session";
@@ -663,6 +664,14 @@ export const SetupCheck = z.object({
   broken: z.array(BrokenExecutable).optional(),
   fix: SetupCommand.nullable(),
   durationMs: z.int().nonnegative(),
+  /**
+   * Agent providers only: the level the runner's detection reported (`ConnectionLevel`,
+   * Foundation §4.3). The check is `ok` only at `verified`; `null` when not installed or the
+   * copy can't run. Absent for the other tools.
+   */
+  level: ConnectionLevel.nullable().optional(),
+  /** Agent providers only: when the real check behind `verified` last passed. */
+  verifiedAt: Timestamp.nullable().optional(),
 });
 export type SetupCheck = z.infer<typeof SetupCheck>;
 
@@ -671,7 +680,7 @@ export const SetupStatus = z.object({
   checkedAt: Timestamp,
   /** Persisted in settings once the user finishes the checklist. */
   setupCompleted: z.boolean(),
-  /** At least one agent provider is installed and logged in. */
+  /** At least one agent provider is `verified` (a real check passed with its login). */
   ready: z.boolean(),
   checks: z.array(SetupCheck),
   /** Changes worth a warning (expiring login, logged-out CLI). */

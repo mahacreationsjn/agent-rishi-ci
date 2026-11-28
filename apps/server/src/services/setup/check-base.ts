@@ -115,8 +115,6 @@ export interface CheckEnv {
   nodeVersion: string;
   now: number;
   browserProbe?: Partial<BrowserProbe>;
-  /** The user's home folder, where CLIs keep their settings (default: `os.homedir()`). */
+  /** The user's home folder, for known install locations (default: `os.homedir()`). */
   userHome?: string;
-  /** Read for which login variables are set, never their values (default: `process.env`). */
-  env?: NodeJS.ProcessEnv;
 }
