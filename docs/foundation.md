@@ -39,6 +39,14 @@ Every stored thing that someone owns gets two fields now, before there is more t
 
 Secrets, connections, profiles, role templates and teams carry them. Nothing checks them across people yet; they exist so that Enterprise can later hold company-provided items (usable, not readable) without a data migration.
 
+**Built (F4).**
+
+- **Contracts:** `Ownership` (`owner`, `scope`), `OwnerId` (`own_` and 32 hex digits) and `LocalOwner`, all in `packages/contracts/src/ownership.ts`. `personal(owner)` gives the default for everything made today.
+- **The install's owner** is made once, on the first start, and kept in the database (`install_owner`, one row). The server exposes it as `RunningServer.owner`.
+- **Why the database and not a file:** a restored backup brings back the same owner as the items it holds, and Vault items are bound to their owner (§3.2).
+- **Things that exist already** (projects, sessions, automations) are not changed. They belong to the install as a whole.
+- **What carries the fields:** the owned kinds above, each from the step that adds it (F5 onwards).
+
 ## 3. Vault
 
 The Vault holds the secrets agents use. **Agent Rishi puts a secret where it is needed; the model never sees its value.**

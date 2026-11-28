@@ -8,6 +8,7 @@ export * from "./schema-core";
 export * from "./schema-factory";
 export * from "./schema-github";
 export * from "./schema-orchestration";
+export * from "./schema-ownership";
 export * from "./schema-runners";
 export * from "./schema-search";
 export * from "./schema-usage";

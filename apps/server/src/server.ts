@@ -2,6 +2,7 @@ import { existsSync, rmSync } from "node:fs";
 import {
   AGENT_RISHI_VERSION,
   HOME_RUNNER_ID,
+  type LocalOwner,
   type ServerLock,
   TerminalQuery,
 } from "@agent-rishi/contracts";
@@ -45,6 +46,7 @@ import { loopbackOrigins, securityMiddleware } from "./security";
 import { type AppServices, createServices, type ServicesOptions } from "./services/container";
 import { type Exec, runTool } from "./services/exec";
 import { FILE_RESET_NOTICES, reportFileReset } from "./services/file-reset-notice";
+import { ensureLocalOwner } from "./services/owner";
 import { SearchBackfill } from "./services/search/backfill";
 import { createSecretStore, MemorySecretStore, type SecretStore } from "./services/secrets";
 import { sessionWorkdir } from "./services/sessions/workdir";
@@ -175,6 +177,8 @@ export interface RunningServer {
   paths: HomePaths;
   store: EventStore;
   database: Database;
+  /** This install's owner (`docs/foundation.md` §2): what owned things are bound to. */
+  owner: LocalOwner;
   services: AppServices;
   /** The home runner's client (none when the runner is off). */
   runner: RunnerClient | undefined;
@@ -203,6 +207,7 @@ export async function startServer(opts: StartServerOptions): Promise<RunningServ
     log,
   });
   const database = openDatabase(paths.db, opts.migrationsDir);
+  const owner = ensureLocalOwner(database.db);
   const store = new EventStore(database.db);
   const settings = new SettingsStore(paths.settings);
   if (settings.reset) reportFileReset(settings.reset, FILE_RESET_NOTICES.settings, { store, log });
@@ -511,6 +516,7 @@ export async function startServer(opts: StartServerOptions): Promise<RunningServ
     paths,
     store,
     database,
+    owner,
     services,
     runner,
     runners,
